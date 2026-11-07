@@ -129,3 +129,19 @@ def test_run_loop_handles_commands_and_stops_cleanly(tmp_path):
     assert any("📊 Status" in t for t in telegram.sent)
     assert "angehalten" in telegram.sent[-1]
     assert json.loads((tmp_path / "data" / "state.json").read_text(encoding="utf-8"))["start_equity"] == 150.0
+
+
+class BrokenSession:
+    def post(self, url, json=None, timeout=None):
+        import requests
+        raise requests.ConnectionError(f"HTTPSConnectionPool(host='api.telegram.org', port=443): Max retries exceeded "
+                                       f"with url: {url.split('api.telegram.org')[1]}")
+
+
+def test_telegram_errors_never_log_the_token(caplog):
+    telegram = Telegram("123456:GEHEIMERTOKEN", "42", session=BrokenSession(), sleep=lambda _s: None)
+    with caplog.at_level("WARNING"):
+        assert telegram.send("hallo") is False
+        assert telegram.poll(0) == []
+        telegram.prepare([("status", "x")])
+    assert "GEHEIMERTOKEN" not in caplog.text and "***" in caplog.text

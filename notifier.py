@@ -21,6 +21,11 @@ class Telegram:
         self._sleep = sleep
         self.offset: Optional[int] = None
 
+    def _safe(self, exc: Exception) -> str:
+        """Fehlertext ohne Bot-Token (requests schreibt sonst die ganze Adresse samt Token in die Meldung)."""
+        text = f"{type(exc).__name__}: {exc}"
+        return text.replace(self.token, "***") if self.token else text
+
     def _api(self, method: str, payload: dict[str, Any], timeout: float) -> Any:
         url = f"https://api.telegram.org/bot{self.token}/{method}"
         response = self.session.post(url, json=payload, timeout=timeout)
@@ -46,7 +51,7 @@ class Telegram:
                                               "disable_web_page_preview": True}, 20)
                     break
                 except Exception as exc:
-                    log.warning("Telegram senden fehlgeschlagen (%s)", exc)
+                    log.warning("Telegram senden fehlgeschlagen (%s)", self._safe(exc))
                     self._sleep(2.0 * (attempt + 1))
             else:
                 ok = False
@@ -66,7 +71,7 @@ class Telegram:
             if pending:
                 self.offset = int(pending[-1]["update_id"]) + 1
         except Exception as exc:
-            log.warning("Telegram-Vorbereitung unvollständig: %s", exc)
+            log.warning("Telegram-Vorbereitung unvollständig: %s", self._safe(exc))
         return name
 
     def poll(self, timeout: float) -> list[str]:
@@ -80,7 +85,7 @@ class Telegram:
         try:
             updates = self._api("getUpdates", payload, timeout + 15) or []
         except Exception as exc:
-            log.warning("Telegram-Abfrage fehlgeschlagen: %s", exc)
+            log.warning("Telegram-Abfrage fehlgeschlagen: %s", self._safe(exc))
             self._sleep(min(timeout, 10))
             return []
         commands: list[str] = []
