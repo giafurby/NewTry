@@ -1,0 +1,21 @@
+# systemd-Dienst für den NewTry-Bot (install.sh kopiert ihn nach /etc/systemd/system/)
+[Unit]
+Description=NewTry Handelsbot (Binance Spot)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/newtry
+ExecStart=/root/newtry/.venv/bin/python bot.py
+# SIGTERM = geordnet beenden. Absturz oder Netzproblem beim Start (Exit 1) = Neustart nach 30 Sekunden.
+KillSignal=SIGTERM
+TimeoutStopSec=60
+Restart=on-failure
+RestartSec=30
+# Exit 2 = Fehler in der .env oder Schlüssel abgelehnt: kein Neustart-Karussell, erst beheben.
+RestartPreventExitStatus=2
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

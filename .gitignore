@@ -1,0 +1,9 @@
+# Geheimnisse
+.env
+# Laufzeitdaten (Zustand, Protokolle, Papier-Konto)
+data/
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
