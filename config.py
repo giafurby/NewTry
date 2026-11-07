@@ -141,7 +141,7 @@ def load_settings(env_path: Path | str = ".env", environ: dict[str, str] | None 
         dip_enabled=_flag(values, "DIP_ENABLED", True, errors),
         dip_coins=tuple(dict.fromkeys(c.strip().upper() for c in values.get("DIP_COINS", DEFAULT_DIP_COINS).split(",")
                                       if c.strip())),
-        dip_drop_pct=_number(values, "DIP_DROP_PCT", 10.0, 3.0, 50.0, errors),
+        dip_drop_pct=_number(values, "DIP_DROP_PCT", 9.0, 3.0, 50.0, errors),
         dip_position_pct=_number(values, "DIP_POSITION_PCT", 20.0, 2.0, 50.0, errors),
         dip_max_positions=int(_number(values, "DIP_MAX_POSITIONS", 3, 1, 10, errors)),
         dip_stop_pct=_number(values, "DIP_STOP_PCT", 15.0, 2.0, 50.0, errors),

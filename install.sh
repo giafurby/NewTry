@@ -152,6 +152,10 @@ if [[ "$first_install" == 0 ]]; then
     set_env DAILY_LOSS_LIMIT_PCT 0
     ok "Tageslimit ausgeschaltet (es würde die Crash-Käufe blockieren)."
   fi
+  if [[ "$(env_value "$APP/.env" DIP_DROP_PCT)" == "10" ]]; then
+    set_env DIP_DROP_PCT 9
+    ok "Crash-Kauf schon ab −9 % statt −10 % (im Rückblick mehr Trades und mehr Gewinn bei gleichem Risiko)."
+  fi
   if [[ "$(env_value "$APP/.env" MAX_DRAWDOWN_PCT)" == "25" ]]; then
     set_env MAX_DRAWDOWN_PCT 40
     ok "Notstopp von −25 % auf −40 % gesetzt (der größte Rückgang im Rückblick lag bei 26 %)."

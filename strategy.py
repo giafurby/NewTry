@@ -153,7 +153,7 @@ def exit_reason(stop: float, target: Optional[float], deadline: int, price: floa
 
 # ====================================================================== Regel 2: Crash-Kauf
 #
-# KAUF   wenn eine 15-Minuten-Kerze mindestens 10 % unter dem Schluss von vor 4 Stunden (16 Kerzen) schließt.
+# KAUF   wenn eine 15-Minuten-Kerze mindestens 9 % unter dem Schluss von vor 4 Stunden (16 Kerzen) schließt.
 #        Das sind meist Zwangsliquidationen, nach denen der Kurs oft ein Stück zurückfedert.
 # GRÖSSE 20 % des Kapitals, höchstens 5 solcher Positionen, nur große, geprüfte Coins.
 # RAUS   nach 4 Stunden – oder beim Notstop 15 % unter dem Einstieg.

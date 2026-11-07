@@ -9,7 +9,7 @@ Wie die Regeln ausgewählt wurden (640 Daytrading-Varianten, Trend, Momentum, H�
 
 | | ① Trend | ② Crash-Kauf |
 |---|---|---|
-| **Kauf** | eine 4h-Kerze schließt über dem Hoch der vorherigen 100 Kerzen und über der EMA 200 | ein großer Coin fällt binnen 4 Stunden um 10 % oder mehr (Prüfung alle 15 Minuten) |
+| **Kauf** | eine 4h-Kerze schließt über dem Hoch der vorherigen 100 Kerzen und über der EMA 200 | ein großer Coin fällt binnen 4 Stunden um 9 % oder mehr (Prüfung alle 15 Minuten) |
 | **Größe** | 1 % Risiko bis zum Stop (bei 150 USDC meist 20–50 USDC), höchstens 33 % | 20 % des Kapitals |
 | **Verkauf** | Stop 2 ATR · Ziel 15 ATR · spätestens nach 20 Tagen | nach 4 Stunden · Notstop 15 % unter dem Einstieg |
 | **Höchstens** | 3 Positionen | 3 Positionen; nach einem Notstop 24 h Sperre für diesen Coin |
@@ -38,12 +38,14 @@ keine API-Kosten, keine erfundenen Antworten, jede Entscheidung nachrechenbar.
 
 ## Ehrliche Erwartung
 
-* **Rückblick** 08/2017–10/2026, 10 Coins, mit doppelt so hohen Kosten wie normal: **+75 % pro Jahr**, größter Rückgang
-  **26 %**, ein Verlustjahr. Auf den bei der Auswahl nicht benutzten Daten 2023–2026: +52 % pro Jahr.
+* **Rückblick** 08/2017–10/2026, 10 Coins, mit doppelt so hohen Kosten wie normal: **+77 % pro Jahr**, größter Rückgang
+  **25 %**. Auf den bei der Auswahl nicht benutzten Daten 2023–2026: +54 % pro Jahr.
+* **Viel handeln kostet Geld:** Ein Bot, der seit 01/2025 den ganzen Tag gehandelt hätte (10–36 Trades am Tag), hätte aus
+  159,69 USDC nach Gebühren **0 bis 0,57 USDC** gemacht. NewTry im selben Zeitraum: 216,59 USDC (`research/active.py`).
 * **Das ist ein bestmöglicher Fall.** Coins, die gestorben sind, fehlen im Datensatz. Die großen Jahre (2020, 2021, 2024)
   waren Bullenmärkte.
-* **Seit Anfang 2025 lag die Kombination bei etwa ±0** (+3,5 % pro Jahr, 2026 bis Oktober −7 %). Wer jetzt startet,
-  startet in genau so einer Phase.
+* **Seit Anfang 2025 lief es zäh:** mit doppelten Kosten etwa ±0, mit normalen Kosten +36 % in 22 Monaten. Wer jetzt
+  startet, startet in genau so einer Phase.
 * 38 % der Monate waren im Minus, der schlechteste mit −11,6 %. Rückgänge von 25–40 % muss man aushalten können.
 * Mit rund 150 € Einsatz bedeutet selbst ein sehr gutes Jahr ein paar Dutzend bis wenige hundert Euro. Setze nur Geld ein,
   dessen Verlust du verkraftest.

@@ -63,7 +63,7 @@ Zeit-Stop 40 Kerzen) war schlechter oder schwankungsreicher.
 
 Simulation auf 15-Minuten-Basis wie im Bot: gemeinsames Kapital, je Coin nur eine Position, Kauf nur mit freiem Geld.
 
-**Endgültige Einstellung:** Trend 1 % Risiko, max. 3 · Crash-Kauf ab −10 % in 4 h, 20 % je Kauf, max. 3, Notstop −15 %,
+**Endgültige Einstellung:** Trend 1 % Risiko, max. 3 · Crash-Kauf ab −9 % in 4 h (zuerst −10 %, siehe unten), 20 % je Kauf, max. 3, Notstop −15 %,
 nach 4 h raus, 24 h Sperre nach Notstop.
 
 | Kosten 0,30 % je Seite | Ertrag/Jahr | größter Rückgang | 2023–2026 | Verlustjahre |
@@ -99,6 +99,12 @@ Notstopp für alles bei −40 % vom Höchststand.
 
 **Startzeitpunkt:** Wer 2019 begann, lag bei +75 % im Jahr, 2022 bei +43 %, 2024 bei +38 %, **2025 bei +3,5 %** (bis 10/2026).
 Der größte Rückgang blieb jeweils bei 25–26 %.
+
+**Nachtrag 07.11.2026 – viel handeln gegen wenig handeln** (`active.py`, 01/2025–10/2026, Start 159,69 USDC, normale Kosten):
+Rücksetzer kaufen den ganzen Tag (15.535 Trades) → 0,00 USDC · Ausbrüche jagen (6.645) → 0,57 USDC · immer im Markt (23.850) →
+0,00 USDC · NewTry mit Crash ab −10 % (187 Trades) → 194,77 USDC · **mit Crash ab −9 % (212 Trades) → 216,59 USDC**. Weil −9 % auch
+2017–2022 (+96 % statt +94 % pro Jahr) und 2023–2026 (+54 % statt +51 %) bei gleichem Rückgang (25 %) besser war, ist −9 % jetzt
+Standard. −8 % brachte mehr Trades, aber einen größeren Rückgang (29 %).
 
 ## 5. Abgleich: echter Bot gegen Simulation (`replay.py`)
 

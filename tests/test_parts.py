@@ -24,7 +24,7 @@ def test_settings_defaults_and_parsing(tmp_path):
     assert s.live and s.api_secret == "xyz" and s.risk_per_trade_pct == 1.5
     assert s.coins == ("ETH", "BTC") and s.quote == "USDC" and s.max_positions == 3
     assert s.data_dir == tmp_path / "data"
-    assert s.dip_enabled and s.dip_drop_pct == 10 and s.dip_position_pct == 20 and s.dip_max_positions == 3
+    assert s.dip_enabled and s.dip_drop_pct == 9 and s.dip_position_pct == 20 and s.dip_max_positions == 3
     assert s.dip_stop_pct == 15 and s.dip_hold_hours == 4 and s.dip_cooldown_hours == 24
     assert s.dip_coins == ("BTC", "ETH", "SOL", "BNB", "XRP", "TRX", "DOGE", "ZEC", "ADA", "BCH")
     assert s.daily_loss_limit_pct == 0 and s.max_drawdown_pct == 40
