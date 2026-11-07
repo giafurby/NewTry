@@ -40,7 +40,8 @@ class FakeExchange(SimulatedExchange):
                  min_cost: float = 5.0):
         super().__init__(balances, slippage=0.0)
         self.prices = dict(prices)
-        self.candles: dict[str, list[list[float]]] = {}
+        self.candles: dict[str, list[list[float]]] = {}          # 4h-Kerzen je Symbol
+        self.candles_15m: dict[str, list[list[float]]] = {}      # 15m-Kerzen je Symbol (Crash-Kauf)
         self.timeout_after_fill = False
         self.timeout_before_fill = False
         self.create_calls = 0
@@ -56,7 +57,7 @@ class FakeExchange(SimulatedExchange):
         return self.prices[symbol]
 
     def fetch_ohlcv(self, symbol: str, timeframe: str = "4h", since: Any = None, limit: Any = None) -> list:
-        rows = self.candles.get(symbol, [])
+        rows = self.candles.get(symbol, []) if timeframe == "4h" else self.candles_15m.get(symbol, [])
         return [list(r) for r in (rows[-limit:] if limit else rows)]
 
     def fetch_tickers(self, symbols: Any = None) -> dict[str, Any]:
@@ -108,6 +109,8 @@ def make_settings(tmp_path: Path, **overrides: Any) -> Settings:
         coins=("ETH", "BTC", "SOL", "XRP"), risk_per_trade_pct=1.0, max_positions=3, max_position_pct=33.0,
         daily_loss_limit_pct=6.0, max_drawdown_pct=25.0, selftest_trade=False, scan_reports=True, report_hour=9,
         timezone="Europe/Berlin", paper_start_balance=150.0, data_dir=tmp_path / "data",
+        dip_enabled=False, dip_coins=("ETH", "BTC", "SOL", "XRP"), dip_drop_pct=10.0, dip_position_pct=20.0,
+        dip_max_positions=5, dip_stop_pct=15.0, dip_hold_hours=4.0, dip_cooldown_hours=24.0,
     )
     return dataclasses.replace(base, **overrides)
 
@@ -147,3 +150,21 @@ def trend_candles(last_open_ts: int, breakout: bool = True, n: int = 1000, start
 
 def last_close(candles: list[list[float]], now_ms: int) -> float:
     return strategy.closed_candles(candles, now_ms)[-1][4]
+
+
+DIP_TF = 15 * 60 * 1000
+
+
+def dip_candles(last_open_ts: int, drop: float, n: int = 40, price: float = 100.0,
+                include_open: bool = True) -> list[list[float]]:
+    """15m-Kerzen: ruhig bei `price`, die letzte geschlossene Kerze liegt `drop` (z. B. 0.12) unter dem Schluss
+    16 Kerzen davor. Danach (optional) die laufende Kerze."""
+    rows = []
+    for i in range(n):
+        ts = last_open_ts - (n - 1 - i) * DIP_TF
+        rows.append([ts, price, price * 1.001, price * 0.999, price, 10.0])
+    low = price * (1 - drop)
+    rows[-1] = [last_open_ts, price, price, low * 0.995, low, 50.0]
+    if include_open:
+        rows.append([last_open_ts + DIP_TF, low, low * 1.002, low * 0.998, low, 5.0])
+    return rows

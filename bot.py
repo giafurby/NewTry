@@ -98,6 +98,8 @@ class Bot:
         self.tag = "💶 ECHTGELD" if settings.live else "📄 PAPIER"
         self.symbols: list[str] = []
         self.missing: list[str] = []
+        self.dip_symbols: list[str] = []
+        self.dip_scan: tuple[int, set[str]] = (0, set())
         self.running = True
         self.balances: Any = None
         self.quote_free = 0.0
@@ -141,7 +143,11 @@ class Bot:
     # ------------------------------------------------------------------ Start
 
     def startup(self) -> None:
-        self.symbols, self.missing = self.broker.load_markets(self.s.coins)
+        wanted = tuple(dict.fromkeys(self.s.coins + (self.s.dip_coins if self.s.dip_enabled else ())))
+        found, _ = self.broker.load_markets(wanted)
+        self.symbols = [x for x in found if coin(x) in self.s.coins]
+        self.missing = [c for c in self.s.coins if f"{c}/{self.q}" not in found]
+        self.dip_symbols = [x for x in found if coin(x) in self.s.dip_coins] if self.s.dip_enabled else []
         if not self.symbols:
             raise ConfigError(f"Keiner der Coins hat bei Binance einen {self.q}-Markt. QUOTE und COINS in der .env prüfen.")
         for symbol in list(self.st["positions"]):
@@ -175,14 +181,16 @@ class Bot:
         lines = [
             f"🤖 NewTry-Bot gestartet · {self.tag}",
             f"Kapital: {de(self.equity)} {self.q} (frei {de(self.quote_free)} {self.q})",
-            "Regel: 4h-Ausbruch über das Hoch der letzten 100 Kerzen bei Kurs über der EMA 200 · "
-            "Stop 2 ATR · Ziel 15 ATR · max. 20 Tage",
-            f"Coins: {len(self.symbols)} beobachtet" + (f" (ohne {self.q}-Markt: {', '.join(self.missing)})"
-                                                         if self.missing else ""),
-            f"Risiko je Trade: {de(s.risk_per_trade_pct, 1)} % (≈ {de(self.equity * s.risk_per_trade_pct / 100)} "
-            f"{self.q}) · max. {s.max_positions} Positionen · Tageslimit −{de(s.daily_loss_limit_pct, 0)} % · "
-            f"Notstopp −{de(s.max_drawdown_pct, 0)} %",
+            f"① Trend: 4h-Ausbruch über das 100-Kerzen-Hoch bei Kurs über der EMA 200 · Stop 2 ATR · Ziel 15 ATR · "
+            f"max. 20 Tage · {de(s.risk_per_trade_pct, 1)} % Risiko je Trade · max. {s.max_positions} Positionen · "
+            f"{len(self.symbols)} Coins" + (f" (ohne {self.q}-Markt: {', '.join(self.missing)})" if self.missing else ""),
         ]
+        if self.dip_symbols:
+            lines.append(f"② Crash-Kauf: −{de(s.dip_drop_pct, 0)} % in 4 h → {de(s.dip_position_pct, 0)} % des Kapitals, "
+                         f"nach {de(s.dip_hold_hours, 0)} h verkaufen, Notstop −{de(s.dip_stop_pct, 0)} %, "
+                         f"max. {s.dip_max_positions} · {', '.join(coin(x) for x in self.dip_symbols)}")
+        lines.append(f"Notstopp für alles bei −{de(s.max_drawdown_pct, 0)} % vom Höchststand"
+                     + (f" · Tageslimit −{de(s.daily_loss_limit_pct, 0)} %" if s.daily_loss_limit_pct > 0 else ""))
         if st["positions"]:
             lines.append(f"Offene Positionen: {', '.join(coin(x) for x in st['positions'])}")
         if st["halted"]:
@@ -256,6 +264,7 @@ class Bot:
             self.reconcile()
             self.check_limits()
             self.store.save()
+        self.check_dip_entries()
         self.check_entries()
         self.daily_report()
         self.heartbeat()
@@ -329,7 +338,7 @@ class Bot:
                                 f"unter dem Höchststand {de(st['peak_equity'])} {self.q}")
             return
         day_floor = float(st["day_start_equity"] or self.equity) * (1 - s.daily_loss_limit_pct / 100)
-        if not st["day_limit_hit"] and self.equity < day_floor:
+        if s.daily_loss_limit_pct > 0 and not st["day_limit_hit"] and self.equity < day_floor:
             st["day_limit_hit"] = True
             self.tg.send(f"⚠️ Tageslimit erreicht: Kapital {de(self.equity)} {self.q}, Tagesbeginn "
                          f"{de(st['day_start_equity'])} {self.q}. Heute keine neuen Käufe; offene Positionen behalten "
@@ -409,7 +418,9 @@ class Bot:
             current = prices.get(symbol)
             if current is None:
                 continue
-            reason = strategy.exit_reason(pos["stop"], pos["target"], int(pos["deadline_ms"]), current, now)
+            label = (f"Zeit-Ausstieg nach {de(self.s.dip_hold_hours, 0)} h" if pos.get("kind") == "dip"
+                     else "Zeit-Stop (20 Tage)")
+            reason = strategy.exit_reason(pos["stop"], pos.get("target"), int(pos["deadline_ms"]), current, now, label)
             if reason:
                 self.close_position(symbol, reason)
         if not positions and self.st.get("liquidate"):
@@ -473,6 +484,8 @@ class Bot:
         else:
             del st["positions"][symbol]
             st["dust"][symbol] = max(0.0, pos["amount"] + dust_before - sold)   # Rest unter der Schrittweite
+            if pos.get("kind") == "dip" and reason == "Stop" and self.s.dip_cooldown_hours > 0:
+                st["dip_cooldown"][symbol] = self.now_ms() + int(self.s.dip_cooldown_hours * 3_600_000)
         trade = self._trade_record(symbol, pos, sold, cost_part, proceeds, fill.price, reason)
         st["closed"] = (st["closed"] + [trade])[-500:]
         st["pending"] = None
@@ -486,11 +499,14 @@ class Bot:
                          "Schlüssel, Handelsrecht und Order-Weg funktionieren. Ab jetzt handelt die Regel.")
             return
         icon = "✅" if pnl >= 0 else "🔻"
-        text = [f"{icon} VERKAUF {coin(symbol)} – {reason}",
+        label = "Crash-Kauf" if pos.get("kind") == "dip" else "Trend"
+        text = [f"{icon} VERKAUF {coin(symbol)} ({label}) – {reason}",
                 f"{qty(sold)} {coin(symbol)} zu {price_text(fill.price)} → {de(proceeds)} {self.q}",
                 f"Ergebnis: {signed(pnl)} {self.q} ({pct(pnl / cost_part * 100 if cost_part else 0.0)})"]
         if partial:
             text.append(f"Teilverkauf – Rest {qty(remaining)} {coin(symbol)} bleibt offen.")
+        if symbol in st["dip_cooldown"] and pos.get("kind") == "dip" and reason == "Stop":
+            text.append(f"{coin(symbol)}: {de(self.s.dip_cooldown_hours, 0)} h kein neuer Crash-Kauf (Schutz vor Totalabsturz).")
         text.append(f"Kapital jetzt: {de(self.equity)} {self.q}")
         self.tg.send("\n".join(text))
 
@@ -530,7 +546,7 @@ class Bot:
             "entry_price": pos["entry_price"], "exit_price": exit_price, "cost": round(cost, 6),
             "proceeds": round(proceeds, 6), "pnl": round(pnl, 6), "pnl_pct": round(pnl / cost * 100, 3) if cost else 0.0,
             "r": round(pnl / pos["risk"], 3) if pos.get("risk") else None, "reason": reason,
-            "selftest": bool(pos.get("selftest")),
+            "selftest": bool(pos.get("selftest")), "kind": pos.get("kind", "trend"),
         }
 
     # ------------------------------------------------------------------ Kaufen
@@ -580,6 +596,84 @@ class Bot:
         self.store.save()
         self.report_scan(candle_open, checks, failed)
 
+    def check_dip_entries(self) -> None:
+        """Direkt nach jedem 15m-Kerzenschluss: Ist ein großer Coin in 4 Stunden um DIP_DROP_PCT % gefallen?"""
+        if not self.dip_symbols:
+            return
+        now = self.now_ms()
+        tf = strategy.DIP_TIMEFRAME_MS
+        bar_open = now // tf * tf
+        signal_ts = bar_open - tf
+        if int(self.st.get("last_dip_candle") or 0) >= signal_ts:
+            return
+        age = now - bar_open
+        if age < 15_000:
+            return
+        if age > strategy.DIP_ENTRY_WINDOW_MS:
+            self.st["last_dip_candle"] = signal_ts
+            return
+        if self.dip_scan[0] != signal_ts:
+            self.dip_scan = (signal_ts, set())
+        done = self.dip_scan[1]
+        failed = False
+        for symbol in self.dip_symbols:
+            if symbol in done:
+                continue
+            try:
+                candles = self.broker.fetch_candles(symbol, strategy.DIP_TIMEFRAME, strategy.DIP_FETCH_CANDLES)
+            except ExchangeProblem as exc:
+                log.warning("15m-Kerzen %s: %s", symbol, exc)
+                failed = True
+                continue
+            closed = [c for c in candles if int(c[0]) + tf <= now]
+            if not closed or int(closed[-1][0]) != signal_ts:
+                failed = True                     # Binance hat die Kerze noch nicht fertig
+                continue
+            check = strategy.evaluate_dip(symbol, closed, self.s.dip_drop_pct)
+            if check.signal:
+                note = self.try_enter_dip(check)
+                self.tg.send(f"⚡ Einbruch {coin(symbol)}: {pct(check.change_pct)} in 4 h – {note}",
+                             silent=not note.startswith("gekauft"))
+            done.add(symbol)
+        if failed and age + LOOP_SECONDS * 1000 < strategy.DIP_ENTRY_WINDOW_MS:
+            return
+        self.st["last_dip_candle"] = signal_ts
+
+    def try_enter_dip(self, check: strategy.DipCheck) -> str:
+        st, s = self.st, self.s
+        symbol = check.symbol
+        if st["halted"]:
+            return "nicht gekauft – Notstopp aktiv (/weiter)"
+        if st["paused"]:
+            return "nicht gekauft – pausiert (/weiter)"
+        if symbol in st["positions"]:
+            return "nicht gekauft – Coin schon im Bestand"
+        if st["entered_dip"].get(symbol) == check.candle_ts:
+            return "auf diese Kerze schon gekauft"
+        if int(st["dip_cooldown"].get(symbol) or 0) > self.now_ms():
+            return f"nicht gekauft – Sperre nach Notstop bis {self.when(int(st['dip_cooldown'][symbol]))}"
+        if sum(1 for p in st["positions"].values() if p.get("kind") == "dip") >= s.dip_max_positions:
+            return f"nicht gekauft – schon {s.dip_max_positions} Crash-Käufe offen"
+        if st.get("pending"):
+            return "nicht gekauft – vorherige Order wird noch geklärt"
+        market = self.broker.ensure_market(symbol)
+        self.refresh()
+        current = self.broker.fetch_prices([symbol]).get(symbol) or check.close
+        wanted = self.equity * s.dip_position_pct / 100
+        budget = min(wanted, self.quote_free * CASH_BUFFER)
+        minimum = max(market.min_cost, 5.0) * MIN_ORDER_BUFFER
+        if budget < wanted * 0.5 or budget < minimum:
+            return f"nicht gekauft – zu wenig {self.q} frei ({de(self.quote_free)} {self.q})"
+        amount = self.broker.round_amount(symbol, budget / current)
+        if amount * current < minimum:
+            amount = self.broker.round_amount(symbol, amount + market.amount_step)
+        if amount <= 0 or amount < market.min_amount or amount * current > self.quote_free * CASH_BUFFER:
+            return f"nicht gekauft – zu wenig {self.q} frei ({de(self.quote_free)} {self.q})"
+        return self.execute_buy(symbol, amount, {"kind": "dip", "stop_fraction": s.dip_stop_pct / 100,
+                                                 "target_fraction": None, "candle_ts": check.candle_ts,
+                                                 "hold_ms": s.dip_hold_hours * 3_600_000,
+                                                 "change_pct": check.change_pct, "atr": 0.0})
+
     def report_scan(self, candle_close: int, checks: list[strategy.Check], failed: list[str]) -> None:
         signals = [c for c in checks if c.signal]
         if not signals and not self.s.scan_reports:
@@ -613,8 +707,8 @@ class Bot:
             return "schon im Bestand"
         if st["entered"].get(symbol) == check.candle_ts:
             return "auf dieses Signal schon gekauft"
-        if len(st["positions"]) >= s.max_positions:
-            return f"nicht gekauft – schon {s.max_positions} Positionen offen"
+        if sum(1 for p in st["positions"].values() if p.get("kind", "trend") == "trend") >= s.max_positions:
+            return f"nicht gekauft – schon {s.max_positions} Trend-Positionen offen"
         if st.get("pending"):
             return "nicht gekauft – vorherige Order wird noch geklärt"
         market = self.broker.ensure_market(symbol)
@@ -634,7 +728,7 @@ class Bot:
             amount = self.broker.round_amount(symbol, amount + market.amount_step)
         if amount <= 0 or amount < market.min_amount or amount * current > self.quote_free * CASH_BUFFER:
             return f"nicht gekauft – zu wenig {self.q} frei ({de(self.quote_free)} {self.q})"
-        return self.execute_buy(symbol, amount, {"stop_fraction": check.stop_fraction,
+        return self.execute_buy(symbol, amount, {"kind": "trend", "stop_fraction": check.stop_fraction,
                                                  "target_fraction": check.target_fraction,
                                                  "candle_ts": check.candle_ts, "atr": check.atr})
 
@@ -671,16 +765,24 @@ class Bot:
         entry = fill.price
         cost = fill.cost + fill.fee_quote
         stop_fraction = float(info["stop_fraction"])
+        kind = info.get("kind") or "trend"
         candle = info.get("candle_ts")
-        deadline = strategy.deadline_ms(int(candle)) if candle else self.now_ms() + 3_600_000
+        if kind == "dip":
+            deadline = self.now_ms() + int(float(info["hold_ms"]))
+        else:
+            deadline = strategy.deadline_ms(int(candle)) if candle else self.now_ms() + 3_600_000
+        target_fraction = info.get("target_fraction")
         position = {
-            "symbol": symbol, "amount": net, "entry_price": entry, "cost": cost,
-            "stop": entry * (1 - stop_fraction), "target": entry * (1 + float(info["target_fraction"])),
+            "symbol": symbol, "kind": kind, "amount": net, "entry_price": entry, "cost": cost,
+            "stop": entry * (1 - stop_fraction),
+            "target": entry * (1 + float(target_fraction)) if target_fraction is not None else None,
             "deadline_ms": deadline, "opened_at": self.iso(), "candle_ts": candle,
             "risk": cost * stop_fraction, "order_id": fill.order_id, "selftest": bool(info.get("selftest")),
         }
         st["positions"][symbol] = position
-        if candle:
+        if candle and kind == "dip":
+            st["entered_dip"][symbol] = int(candle)
+        elif candle:
             st["entered"][symbol] = int(candle)
         st["fees_paid"] = float(st.get("fees_paid") or 0.0) + fill.fee_value
         st["pending"] = None
@@ -690,9 +792,18 @@ class Bot:
         if position["selftest"]:
             return
         stop_pct = (position["stop"] / entry - 1) * 100
+        if kind == "dip":
+            self.tg.send("\n".join([
+                f"🟢 CRASH-KAUF {coin(symbol)} ({pct(float(info.get('change_pct') or 0.0))} in 4 h)",
+                f"{qty(net)} {coin(symbol)} zu {price_text(entry)} = {de(cost)} {self.q}",
+                f"Verkauf um {self.when(deadline)} · Notstop {price_text(position['stop'])} ({pct(stop_pct)})",
+                f"Risiko bis zum Notstop: ca. {de(position['risk'])} {self.q} "
+                f"({de(position['risk'] / max(self.equity, 1e-9) * 100, 1)} % des Kapitals)",
+            ] + ([f"Gebühr: {fill.fee_note}"] if fill.fee_note else [])))
+            return
         target_pct = (position["target"] / entry - 1) * 100
         self.tg.send("\n".join([
-            f"🟢 KAUF {coin(symbol)} (4h-Ausbruch)",
+            f"🟢 KAUF {coin(symbol)} (Trend, 4h-Ausbruch)",
             f"{qty(net)} {coin(symbol)} zu {price_text(entry)} = {de(cost)} {self.q}",
             f"Stop {price_text(position['stop'])} ({pct(stop_pct)}) · Ziel {price_text(position['target'])} "
             f"({pct(target_pct)})",
@@ -767,23 +878,32 @@ class Bot:
             f"Kapital: {de(self.equity)} {self.q} · seit Start {signed(profit)} {self.q}"
             + (f" ({pct(profit / start * 100)})" if start else ""),
             f"Frei: {de(self.quote_free)} {self.q} · Höchststand {de(peak)} {self.q}",
-            f"Heute: {signed(self.equity - day_start)} {self.q} · Tageslimit −{de(s.daily_loss_limit_pct, 0)} %",
+            f"Heute: {signed(self.equity - day_start)} {self.q}"
+            + (f" · Tageslimit −{de(s.daily_loss_limit_pct, 0)} %" if s.daily_loss_limit_pct > 0 else ""),
             f"Notstopp unter {de(peak * (1 - s.max_drawdown_pct / 100))} {self.q} (−{de(s.max_drawdown_pct, 0)} % "
             "vom Höchststand)",
         ]
         positions = st["positions"]
-        lines.append(f"Positionen ({len(positions)}/{s.max_positions}):" if positions else "Keine offenen Positionen.")
+        lines.append(f"Positionen ({len(positions)}):" if positions else "Keine offenen Positionen.")
         for symbol, pos in positions.items():
             mark = self.prices.get(symbol, pos["entry_price"])
             pnl = pos["amount"] * mark - pos["cost"]
-            lines.append(f"• {coin(symbol)}: {qty(pos['amount'])} zu {price_text(pos['entry_price'])} → "
+            label = "Crash-Kauf" if pos.get("kind") == "dip" else "Trend"
+            lines.append(f"• {coin(symbol)} ({label}): {qty(pos['amount'])} zu {price_text(pos['entry_price'])} → "
                          f"{price_text(mark)} ({pct((mark / pos['entry_price'] - 1) * 100)}, {signed(pnl)} {self.q})")
-            lines.append(f"   Stop {price_text(pos['stop'])} · Ziel {price_text(pos['target'])} · bis "
-                         f"{self.when(int(pos['deadline_ms']))}")
+            if pos.get("target") is None:
+                lines.append(f"   Notstop {price_text(pos['stop'])} · Verkauf um {self.when(int(pos['deadline_ms']))}")
+            else:
+                lines.append(f"   Stop {price_text(pos['stop'])} · Ziel {price_text(pos['target'])} · bis "
+                             f"{self.when(int(pos['deadline_ms']))}")
         trades = [t for t in st["closed"] if not t.get("selftest")]
         wins = sum(1 for t in trades if t["pnl"] > 0)
         lines.append(f"Abgeschlossen: {len(trades)} Trades ({wins} Gewinner) · {signed(sum(t['pnl'] for t in trades))} "
                      f"{self.q} · Gebühren bisher {de(float(st.get('fees_paid') or 0.0))} {self.q}")
+        for kind, label in (("trend", "Trend"), ("dip", "Crash-Kauf")):
+            part = [t for t in trades if t.get("kind", "trend") == kind]
+            if part:
+                lines.append(f"   {label}: {len(part)} Trades, {signed(sum(t['pnl'] for t in part))} {self.q}")
         return lines
 
     # ------------------------------------------------------------------ Telegram-Befehle
@@ -804,8 +924,10 @@ class Bot:
 
     def cmd_help(self) -> None:
         self.tg.send("\n".join([f"🤖 NewTry-Bot · {self.tag}"] + [f"/{c} – {d}" for c, d in COMMANDS] + [
-            f"Gekauft wird nur direkt nach einem 4h-Kerzenschluss ({self.close_hours()} Uhr), wenn ein Coin über das "
-            "Hoch der letzten 100 Kerzen ausbricht und über der EMA 200 liegt."]))
+            f"① Trend: Kauf direkt nach einem 4h-Kerzenschluss ({self.close_hours()} Uhr), wenn ein Coin über das Hoch "
+            "der letzten 100 Kerzen ausbricht und über der EMA 200 liegt.",
+            f"② Crash-Kauf: Fällt ein großer Coin in 4 Stunden um {de(self.s.dip_drop_pct, 0)} % oder mehr, kauft der Bot "
+            f"und verkauft nach {de(self.s.dip_hold_hours, 0)} Stunden wieder (Notstop −{de(self.s.dip_stop_pct, 0)} %)."]))
 
     def cmd_status(self) -> None:
         self.refresh()
@@ -849,7 +971,10 @@ class Bot:
             lines.append("Unter der EMA 200 (dort kauft die Regel nie): " + ", ".join(coin(c.symbol) for c in below))
         if thin:
             lines.append("Zu wenig Kursdaten (zu neu): " + ", ".join(coin(c.symbol) for c in thin))
-        lines.append(f"Nächste Prüfung: {self.when(self.next_close_ms())}")
+        if self.dip_symbols:
+            lines.append(f"Crash-Kauf: wartet auf −{de(self.s.dip_drop_pct, 0)} % in 4 Stunden bei "
+                         + ", ".join(coin(x) for x in self.dip_symbols) + " (Prüfung alle 15 Minuten).")
+        lines.append(f"Nächste Trend-Prüfung: {self.when(self.next_close_ms())}")
         self.tg.send("\n".join(lines))
 
     def cmd_pause(self) -> None:

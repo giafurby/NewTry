@@ -1,5 +1,10 @@
 """
-Die Handelsregel: 4-Stunden-Trendausbruch.
+Zwei Handelsregeln, die sich ergänzen (Auswertung: research/ERGEBNISSE.md):
+
+1. TREND – 4-Stunden-Ausbruch (unten, `evaluate`).
+2. CRASH-KAUF – nach einem schnellen Einbruch kaufen, nach 4 Stunden wieder verkaufen (`evaluate_dip`).
+
+Regel 1 im Detail – 4-Stunden-Trendausbruch.
 
 Sie stammt aus der Echtdaten-Studie des alten Projekts (azubiassist, ANLEITUNG_HETZNER.md Teil 18 und 20), geprüft auf
 echten Binance-Kerzen von 2017 bis 10/2026 auf 10 Coins. Der Rückblick war positiv, die Zukunft wird schwächer sein:
@@ -135,11 +140,52 @@ def deadline_ms(signal_candle_ts: int) -> int:
     return int(signal_candle_ts) + TIMEFRAME_MS + MAX_HOLD_BARS * TIMEFRAME_MS
 
 
-def exit_reason(stop: float, target: float, deadline: int, price: float, now_ms: int) -> Optional[str]:
+def exit_reason(stop: float, target: Optional[float], deadline: int, price: float, now_ms: int,
+                time_label: str = "Zeit-Stop (20 Tage)") -> Optional[str]:
     if price <= stop:
         return "Stop"
-    if price >= target:
+    if target is not None and price >= target:
         return "Ziel"
     if now_ms >= deadline:
-        return "Zeit-Stop (20 Tage)"
+        return time_label
     return None
+
+
+# ====================================================================== Regel 2: Crash-Kauf
+#
+# KAUF   wenn eine 15-Minuten-Kerze mindestens 10 % unter dem Schluss von vor 4 Stunden (16 Kerzen) schließt.
+#        Das sind meist Zwangsliquidationen, nach denen der Kurs oft ein Stück zurückfedert.
+# GRÖSSE 20 % des Kapitals, höchstens 5 solcher Positionen, nur große, geprüfte Coins.
+# RAUS   nach 4 Stunden – oder beim Notstop 15 % unter dem Einstieg.
+# SPERRE nach einem Notstop 24 Stunden kein neuer Crash-Kauf in diesem Coin: Ohne diese Sperre würde die Regel einen
+#        Coin, der wie LUNA 2022 auf null fällt, immer wieder nachkaufen (Simulation: 52 Käufe statt 4).
+
+DIP_TIMEFRAME = "15m"
+DIP_TIMEFRAME_MS = 15 * 60 * 1000
+DIP_LOOKBACK_BARS = 16
+DIP_FETCH_CANDLES = 40
+DIP_ENTRY_WINDOW_MS = 5 * 60 * 1000       # nur direkt nach dem Kerzenschluss kaufen, sonst ist die Chance vorbei
+
+
+@dataclass(frozen=True)
+class DipCheck:
+    symbol: str
+    candle_ts: int
+    close: float
+    reference: float
+    change_pct: float
+    signal: bool
+
+
+def evaluate_dip(symbol: str, candles: Sequence[Candle], drop_pct: float) -> DipCheck:
+    """Prüft die LETZTE geschlossene 15m-Kerze: Schluss mindestens `drop_pct` % unter dem Schluss 16 Kerzen davor?
+    Fehlt in diesem Fenster eine Kerze (Börsenwartung), gibt es kein Signal – das wäre kein echter Einbruch."""
+    need = DIP_LOOKBACK_BARS + 1
+    if len(candles) < need:
+        last = candles[-1] if candles else (0, 0, 0, 0, 0, 0)
+        return DipCheck(symbol, int(last[0]), float(last[4]), 0.0, 0.0, False)
+    window = candles[-need:]
+    contiguous = all(int(window[k + 1][0]) - int(window[k][0]) == DIP_TIMEFRAME_MS for k in range(len(window) - 1))
+    close, reference = float(window[-1][4]), float(window[0][4])
+    change = (close / reference - 1.0) * 100.0 if reference > 0 else 0.0
+    return DipCheck(symbol, int(window[-1][0]), close, reference, change, contiguous and change <= -abs(drop_pct))

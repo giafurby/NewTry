@@ -9,6 +9,8 @@ DEFAULT_COINS = (
     "BTC,ETH,SOL,BNB,XRP,ADA,DOGE,TRX,LTC,LINK,"
     "AVAX,DOT,ATOM,ETC,XLM,NEAR,UNI,FIL,APT,ARB,OP,SUI,HBAR,AAVE,ALGO"
 )
+# Crash-Kauf nur in den 10 großen Coins, auf denen die Regel geprüft wurde (research/ERGEBNISSE.md)
+DEFAULT_DIP_COINS = "BTC,ETH,SOL,BNB,XRP,TRX,DOGE,ZEC,ADA,BCH"
 
 
 class ConfigError(Exception):
@@ -43,11 +45,19 @@ class Settings:
     telegram_chat_id: str
     quote: str                    # Währung, mit der gekauft wird (z. B. USDC)
     coins: tuple[str, ...]
-    risk_per_trade_pct: float     # so viel % des Kapitals darf ein einzelner Trade bis zum Stop verlieren
-    max_positions: int
-    max_position_pct: float       # höchstens so viel % des Kapitals in einer Position
-    daily_loss_limit_pct: float   # Tagesverlust, ab dem heute nichts mehr gekauft wird
+    risk_per_trade_pct: float     # Trend: so viel % des Kapitals darf ein Trade bis zum Stop verlieren
+    max_positions: int            # Trend: höchstens so viele Positionen
+    max_position_pct: float       # Trend: höchstens so viel % des Kapitals in einer Position
+    daily_loss_limit_pct: float   # Tagesverlust, ab dem heute nichts mehr gekauft wird (0 = aus)
     max_drawdown_pct: float       # Rückgang vom Höchststand, ab dem alles verkauft und angehalten wird
+    dip_enabled: bool             # Crash-Kauf an/aus
+    dip_coins: tuple[str, ...]
+    dip_drop_pct: float           # so tief muss der Kurs in 4 Stunden fallen
+    dip_position_pct: float       # Größe je Crash-Kauf in % des Kapitals
+    dip_max_positions: int
+    dip_stop_pct: float           # Notstop unter dem Einstieg
+    dip_hold_hours: float         # nach so vielen Stunden wird verkauft
+    dip_cooldown_hours: float     # Sperre für den Coin nach einem Notstop
     selftest_trade: bool          # einmaliger Funktionstest (Kauf + Verkauf ~7 USDC) beim ersten Echtgeld-Start
     scan_reports: bool            # nach jeder 4h-Prüfung eine stille Telegram-Nachricht
     report_hour: int              # Uhrzeit des Tagesberichts (Ortszeit)
@@ -108,6 +118,9 @@ def load_settings(env_path: Path | str = ".env", environ: dict[str, str] | None 
     bad = [c for c in coins if not c.isalnum() or c == quote]
     if bad:
         errors.append(f"COINS enthält ungültige Einträge: {', '.join(bad)}.")
+    bad_dip = [c for c in values.get("DIP_COINS", DEFAULT_DIP_COINS).split(",") if c.strip() and not c.strip().isalnum()]
+    if bad_dip:
+        errors.append(f"DIP_COINS enthält ungültige Einträge: {', '.join(bad_dip)}.")
 
     settings = Settings(
         mode=mode,
@@ -120,8 +133,17 @@ def load_settings(env_path: Path | str = ".env", environ: dict[str, str] | None 
         risk_per_trade_pct=_number(values, "RISK_PER_TRADE_PCT", 1.0, 0.1, 3.0, errors),
         max_positions=int(_number(values, "MAX_POSITIONS", 3, 1, 10, errors)),
         max_position_pct=_number(values, "MAX_POSITION_PCT", 33.0, 5.0, 100.0, errors),
-        daily_loss_limit_pct=_number(values, "DAILY_LOSS_LIMIT_PCT", 6.0, 1.0, 50.0, errors),
-        max_drawdown_pct=_number(values, "MAX_DRAWDOWN_PCT", 25.0, 5.0, 90.0, errors),
+        daily_loss_limit_pct=_number(values, "DAILY_LOSS_LIMIT_PCT", 0.0, 0.0, 50.0, errors),
+        max_drawdown_pct=_number(values, "MAX_DRAWDOWN_PCT", 40.0, 5.0, 90.0, errors),
+        dip_enabled=_flag(values, "DIP_ENABLED", True, errors),
+        dip_coins=tuple(dict.fromkeys(c.strip().upper() for c in values.get("DIP_COINS", DEFAULT_DIP_COINS).split(",")
+                                      if c.strip())),
+        dip_drop_pct=_number(values, "DIP_DROP_PCT", 10.0, 3.0, 50.0, errors),
+        dip_position_pct=_number(values, "DIP_POSITION_PCT", 20.0, 2.0, 50.0, errors),
+        dip_max_positions=int(_number(values, "DIP_MAX_POSITIONS", 3, 1, 10, errors)),
+        dip_stop_pct=_number(values, "DIP_STOP_PCT", 15.0, 2.0, 50.0, errors),
+        dip_hold_hours=_number(values, "DIP_HOLD_HOURS", 4.0, 0.5, 72.0, errors),
+        dip_cooldown_hours=_number(values, "DIP_COOLDOWN_HOURS", 24.0, 0.0, 336.0, errors),
         selftest_trade=_flag(values, "SELFTEST_TRADE", True, errors),
         scan_reports=_flag(values, "SCAN_REPORTS", True, errors),
         report_hour=int(_number(values, "REPORT_HOUR", 9, 0, 23, errors)),
@@ -145,4 +167,6 @@ _KEYS = {
     "MODE", "BINANCE_API_KEY", "BINANCE_API_SECRET", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "QUOTE", "COINS",
     "RISK_PER_TRADE_PCT", "MAX_POSITIONS", "MAX_POSITION_PCT", "DAILY_LOSS_LIMIT_PCT", "MAX_DRAWDOWN_PCT",
     "SELFTEST_TRADE", "SCAN_REPORTS", "REPORT_HOUR", "TIMEZONE", "PAPER_START_BALANCE", "DATA_DIR",
+    "DIP_ENABLED", "DIP_COINS", "DIP_DROP_PCT", "DIP_POSITION_PCT", "DIP_MAX_POSITIONS", "DIP_STOP_PCT",
+    "DIP_HOLD_HOURS", "DIP_COOLDOWN_HOURS",
 }

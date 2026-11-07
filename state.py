@@ -18,6 +18,9 @@ DEFAULTS: dict[str, Any] = {
     "entered": {},              # symbol -> Signal-Kerze, auf die schon gekauft wurde (nie zweimal dieselbe)
     "dust": {},                 # symbol -> eigene Reste unter der Schrittweite (werden beim nächsten Verkauf mitverkauft)
     "last_signal_candle": 0,    # zuletzt vollständig geprüfte Signal-Kerze
+    "last_dip_candle": 0,       # zuletzt geprüfte 15m-Kerze für den Crash-Kauf
+    "entered_dip": {},          # symbol -> 15m-Kerze, auf die schon ein Crash-Kauf erfolgte
+    "dip_cooldown": {},         # symbol -> Zeit (ms), bis zu der nach einem Notstop kein Crash-Kauf erfolgt
     "paused": False,            # /pause: keine neuen Käufe
     "halted": False,            # Notstopp: alles verkauft, keine neuen Käufe bis /weiter
     "liquidate": False,         # /notverkauf_ja: alle Positionen verkaufen, bis keine mehr offen ist

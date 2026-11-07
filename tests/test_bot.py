@@ -74,7 +74,7 @@ def test_max_positions_respected(tmp_path):
     scan_now(bot, clock)
     assert len(bot.st["positions"]) == 3
     assert "XRP/USDC" not in bot.st["positions"]
-    assert telegram.any("schon 3 Positionen")
+    assert telegram.any("schon 3 Trend-Positionen")
 
 
 def test_pause_blocks_entries_and_resume(tmp_path):
@@ -143,7 +143,7 @@ def test_stop_loss_sells_and_books_loss_with_fees(tmp_path):
     assert trade["pnl"] == pytest.approx(expected, rel=1e-6)
     assert trade["pnl"] < 0
     assert trade["r"] == pytest.approx(trade["pnl"] / pos["risk"], rel=1e-3)
-    assert telegram.any("VERKAUF ETH – Stop")
+    assert telegram.any("VERKAUF ETH (Trend) – Stop")
     assert not telegram.any("Einzahlung") and not telegram.any("Auszahlung")
 
 
@@ -156,7 +156,7 @@ def test_target_sells_with_profit(tmp_path):
     bot.tick()
     trade = bot.st["closed"][-1]
     assert trade["reason"] == "Ziel" and trade["pnl"] > 0
-    assert telegram.any("✅ VERKAUF ETH – Ziel")
+    assert telegram.any("✅ VERKAUF ETH (Trend) – Ziel")
 
 
 def test_time_stop_after_20_days(tmp_path):

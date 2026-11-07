@@ -144,6 +144,17 @@ if [[ -z "$(env_value "$APP/.env" TELEGRAM_BOT_TOKEN)" && "$first_install" == 1 
   warn "Kein Telegram-Zugang gefunden."
   enter_telegram
 fi
+# Ältere Installationen: alte Standardwerte auf die neue Strategie umstellen (selbst gewählte Werte bleiben)
+if [[ "$first_install" == 0 ]]; then
+  if [[ "$(env_value "$APP/.env" DAILY_LOSS_LIMIT_PCT)" == "6" ]]; then
+    set_env DAILY_LOSS_LIMIT_PCT 0
+    ok "Tageslimit ausgeschaltet (es würde die Crash-Käufe blockieren)."
+  fi
+  if [[ "$(env_value "$APP/.env" MAX_DRAWDOWN_PCT)" == "25" ]]; then
+    set_env MAX_DRAWDOWN_PCT 40
+    ok "Notstopp von −25 % auf −40 % gesetzt (der größte Rückgang im Rückblick lag bei 26 %)."
+  fi
+fi
 quote="$(env_value "$APP/.env" QUOTE)"
 quote="${quote:-USDC}"
 
@@ -153,7 +164,8 @@ if [[ -z "$WANT_MODE" && "$first_install" == 1 ]]; then
 
   ${Y}Mit ECHTGELD handeln?${N}
   * Der Bot kauft und verkauft dann mit dem ${quote}-Guthaben auf deinem Binance-Konto.
-  * Risiko je Trade 1 % des Kapitals, höchstens 3 Positionen, Tageslimit −6 %, Notstopp bei −25 %.
+  * Trend: 1 % Risiko je Trade, höchstens 3 Positionen. Crash-Kauf: 20 % je Kauf, höchstens 3, Notstop −15 %.
+  * Notstopp für alles bei −40 % vom Höchststand (im Rückblick lag der größte Rückgang bei 26 %).
   * Beim ersten Start macht er einen Funktionstest: Kauf und sofortiger Verkauf für ca. 7 ${quote}.
   * Gewinne sind NICHT garantiert. Setze nur Geld ein, dessen Verlust du verkraften kannst.
 
@@ -229,7 +241,8 @@ ok "NewTry LÄUFT · $([[ "$mode" == live ]] && echo "${R}ECHTGELD${N}" || echo 
 cat <<TEXT
 
   In Telegram: Startmeldung$([[ "$mode" == live ]] && echo " und Funktionstest (echter Kauf + Verkauf)"), danach
-  nach jedem 4h-Kerzenschluss eine kurze Prüfmeldung. Befehle: /status /markt /trades /pause /weiter /notverkauf
+  nach jedem 4h-Kerzenschluss eine kurze Prüfmeldung und eine Meldung bei jedem Crash-Kauf.
+  Befehle: /status /markt /trades /pause /weiter /notverkauf
 
   Auf dem Server:
     Läuft er?          systemctl is-active ${SERVICE}
