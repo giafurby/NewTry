@@ -40,6 +40,9 @@ MIN_ORDER_BUFFER = 1.15      # 15 % Abstand zum Binance-Minimum je Order
 CASH_BUFFER = 0.98           # höchstens 98 % des freien Guthabens in eine Order
 MAX_RISK_FRACTION = 0.03     # die Mindest-Ordergröße nur nutzen, wenn der Trade dann höchstens 3 % riskiert
 SELFTEST_COINS = ("ETH", "BTC", "SOL", "XRP", "BNB")
+STOP_REASONS = ("Stop", "Notbremse an der Börse")
+STOP_PREFIX = "ntx"          # eigene Notbremsen bei Binance erkennt der Bot an diesem Anfang der Order-Nummer
+OWN_PREFIX = "nt"            # alle Orders dieses Bots
 
 COMMANDS = [
     ("status", "Kapital, Positionen und Grenzen"),
@@ -154,6 +157,8 @@ class Bot:
             if not self.broker.ensure_market(symbol):
                 log.error("Markt %s für eine offene Position nicht gefunden.", symbol)
         self.resolve_pending()
+        if self.st["positions"]:
+            self.check_exchange_stops()      # Notbremsen, die ausgelöst haben, während der Bot aus war (vor refresh!)
         self.refresh()
         st = self.st
         if st["start_equity"] is None:
@@ -167,6 +172,8 @@ class Bot:
         self.tg.prepare(COMMANDS)
         self.tg.send(self.start_message())
         self.warn_foreign_orders()
+        self.ensure_exchange_stops()
+        self.heartbeat()
         selftest_open = any(p.get("selftest") for p in st["positions"].values())   # wird in check_exits verkauft
         if self.s.live and self.s.selftest_trade and not st["selftest_done"] and not selftest_open:
             try:
@@ -189,6 +196,9 @@ class Bot:
             lines.append(f"② Crash-Kauf: −{de(s.dip_drop_pct, 0)} % in 4 h → {de(s.dip_position_pct, 0)} % des Kapitals, "
                          f"nach {de(s.dip_hold_hours, 0)} h verkaufen, Notstop −{de(s.dip_stop_pct, 0)} %, "
                          f"max. {s.dip_max_positions} · {', '.join(coin(x) for x in self.dip_symbols)}")
+        lines.append("🛡 Notbremse bei Binance: " + (
+            f"an – nach jedem Kauf eine Stop-Order direkt an der Börse, {de(s.exchange_stop_buffer_pct, 1)} % unter dem "
+            "Bot-Stop. Sie hält auch, wenn Bot oder Server ausfallen." if s.exchange_stop else "aus (EXCHANGE_STOP=false)"))
         lines.append(f"Notstopp für alles bei −{de(s.max_drawdown_pct, 0)} % vom Höchststand"
                      + (f" · Tageslimit −{de(s.daily_loss_limit_pct, 0)} %" if s.daily_loss_limit_pct > 0 else ""))
         if st["positions"]:
@@ -212,6 +222,7 @@ class Bot:
         except (ExchangeProblem, AuthProblem) as exc:
             log.warning("Offene Orders nicht abrufbar: %s", exc)
             return
+        orders = [o for o in orders if not str(o.get("clientOrderId") or "").startswith(OWN_PREFIX)]
         if not orders:
             return
         listed = "; ".join(f"{o.get('symbol')} {o.get('side')} {o.get('type')} {qty(float(o.get('amount') or 0))}"
@@ -250,6 +261,8 @@ class Bot:
                 log.exception("Unerwarteter Fehler")
                 self.alert(f"bug-{type(exc).__name__}", f"❗ Unerwarteter Fehler: {type(exc).__name__}: {exc}. "
                                                         "Der Bot läuft weiter.")
+            finally:
+                self.heartbeat()              # der Wächter prüft: lebt die Hauptschleife? (auch wenn Binance hakt)
         self.store.save()
         self.tg.send(f"⏹ NewTry-Bot angehalten ({self.tag}). Offene Positionen bleiben stehen und werden nach "
                      "dem Neustart weiter überwacht.")
@@ -260,14 +273,16 @@ class Bot:
         if self.st["positions"]:
             self.check_exits()
         if self.clock() - self.last_balance_check >= BALANCE_SECONDS:
+            if self.st["positions"]:
+                self.check_exchange_stops()       # vor refresh: Erlös einer Notbremse ist keine Einzahlung
             self.refresh()
             self.reconcile()
+            self.ensure_exchange_stops()
             self.check_limits()
             self.store.save()
         self.check_dip_entries()
         self.check_entries()
         self.daily_report()
-        self.heartbeat()
 
     def alert(self, key: str, text: str) -> None:
         now = self.clock()
@@ -304,6 +319,8 @@ class Bot:
         if not after_trade and last is not None:
             flow = self.quote_total - float(last)
             if abs(flow) >= max(1.0, 0.005 * max(self.equity, 1.0)):
+                if any(p.get("stop_order_id") for p in positions.values()) and self.check_exchange_stops():
+                    return                       # das Geld kam von einer Notbremse – schon als Verkauf gebucht
                 self.record_flow(flow)
         self.st["last_quote_balance"] = self.quote_total
         self.last_balance_check = self.clock()
@@ -358,6 +375,8 @@ class Bot:
         if self.balances is None:
             return
         for symbol, pos in list(self.st["positions"].items()):
+            if pos.get("stop_order_id"):
+                continue                          # gesperrte Coins; ob die Notbremse verkauft hat, prüft check_exchange_stops
             market = self.broker.ensure_market(symbol)
             held = self.balances.total(market.base if market else coin(symbol))
             if held >= pos["amount"] * 0.5:
@@ -372,6 +391,120 @@ class Bot:
                           sold_outside=True)
             self.tg.send(f"ℹ️ {coin(symbol)}: Die Coins der Bot-Position liegen nicht mehr auf dem Konto (von Hand "
                          "verkauft oder abgehoben?). Position ausgebucht, Kapital-Rechnung korrigiert.")
+
+    # ------------------------------------------------------------------ Notbremse direkt bei Binance
+
+    def ex_stop_text(self, pos: dict[str, Any]) -> str:
+        if not self.s.exchange_stop or pos.get("selftest"):
+            return ""
+        state = pos.get("ex_stop_state")
+        if pos.get("stop_order_id") and pos.get("ex_stop"):
+            return f"🛡 Notbremse bei Binance ab {price_text(float(pos['ex_stop']))}"
+        if state in ("zu klein", "nicht möglich"):
+            return f"⚠️ Notbremse bei Binance {state} – es gilt nur der Bot-Stop"
+        return "🛡 Notbremse bei Binance: wird gesetzt"
+
+    def ensure_exchange_stops(self) -> None:
+        for symbol in list(self.st["positions"]):
+            self.ensure_exchange_stop_safely(symbol)
+
+    def ensure_exchange_stop_safely(self, symbol: str) -> None:
+        try:
+            self.ensure_exchange_stop(symbol)
+        except (ExchangeProblem, AuthProblem) as exc:
+            log.warning("Notbremse %s noch nicht gesetzt (%s) – neuer Versuch in einer Minute.", symbol, exc)
+
+    def ensure_exchange_stop(self, symbol: str) -> None:
+        """Liegt für die Position eine Stop-Order bei Binance? Wenn nicht: übernehmen (nach Absturz) oder neu setzen."""
+        pos = self.st["positions"].get(symbol)
+        if not self.s.exchange_stop or not pos or pos.get("selftest") or pos.get("stop_order_id"):
+            return
+        if pos.get("ex_stop_state") in ("zu klein", "nicht möglich") and self.now_ms() < int(pos.get("ex_stop_retry_ms") or 0):
+            return
+        market = self.broker.ensure_market(symbol)
+        if market is None:
+            return
+        if not self.broker.supports_stop_limit(symbol):
+            self._ex_stop_unavailable(symbol, pos, "nicht möglich", "Binance erlaubt in diesem Markt keine Stop-Orders")
+            return
+        for order in self.broker.open_orders(symbol):
+            if str(order.get("clientOrderId") or "").startswith(STOP_PREFIX) and order.get("status", "open") == "open":
+                trigger = float(order.get("triggerPrice") or order.get("stopPrice") or 0.0)
+                pos.update(stop_order_id=str(order["id"]), ex_stop=trigger, ex_stop_state="aktiv")
+                self.store.save()
+                log.info("Notbremse %s übernommen (Order %s).", symbol, order["id"])
+                return
+        trigger = self.broker.price_to_precision(symbol, pos["stop"] * (1 - self.s.exchange_stop_buffer_pct / 100))
+        limit = self.broker.price_to_precision(symbol, trigger * (1 - self.s.exchange_stop_gap_pct / 100))
+        current = self.broker.fetch_prices([symbol]).get(symbol)
+        if not current or current <= trigger * 1.002:
+            return                                # Kurs schon am Stop – der Bot verkauft ohnehin gleich selbst
+        balances = self.broker.balances()
+        ours = pos["amount"] + float(self.st["dust"].get(symbol, 0.0))
+        amount = self.broker.round_amount(symbol, min(ours, balances.free(market.base)))
+        if amount <= 0 or amount * limit < market.min_cost:
+            self._ex_stop_unavailable(symbol, pos, "zu klein",
+                                      f"Binance verlangt für Stop-Orders mindestens {de(market.min_cost)} {self.q}")
+            return
+        try:
+            order = self.broker.place_stop_loss(symbol, amount, trigger, limit, self.client_id("x"))
+        except OrderRejected as exc:
+            self._ex_stop_unavailable(symbol, pos, "nicht möglich", str(exc)[:160])
+            return
+        pos.update(stop_order_id=str(order["id"]), ex_stop=trigger, ex_stop_limit=limit, ex_stop_amount=amount,
+                   ex_stop_state="aktiv")
+        self.store.save()
+        log.info("Notbremse %s bei Binance: %s ab %s (Mindestpreis %s).", symbol, amount, trigger, limit)
+
+    def _ex_stop_unavailable(self, symbol: str, pos: dict[str, Any], state: str, why: str) -> None:
+        first = pos.get("ex_stop_state") != state
+        pos["ex_stop_state"] = state
+        pos["ex_stop_retry_ms"] = self.now_ms() + 3_600_000
+        self.store.save()
+        if first:
+            self.tg.send(f"⚠️ {coin(symbol)}: Notbremse bei Binance {state} ({why}). Es gilt der Stop im Bot – der greift "
+                         "aber nur, solange Bot und Server laufen. Neuer Versuch in einer Stunde.")
+
+    def check_exchange_stops(self) -> bool:
+        """Status der Notbremsen bei Binance. True, wenn eine ausgeführte Notbremse als Verkauf gebucht wurde."""
+        booked = False
+        for symbol, pos in list(self.st["positions"].items()):
+            order_id = pos.get("stop_order_id")
+            if not order_id:
+                continue
+            order = self.broker.get_order(symbol, str(order_id))
+            status = (order or {}).get("status")
+            filled = float((order or {}).get("filled") or 0.0)
+            if order is not None and status == "open":
+                if filled > 0:                    # teilweise verkauft: den Rest sofort selbst verkaufen
+                    self.close_position(symbol, "Notbremse an der Börse (Rest)")
+                    booked = True
+                continue
+            pos["stop_order_id"] = None
+            pos["ex_stop_state"] = None
+            self.store.save()
+            if filled > 0:
+                self.book_sell(symbol, self.broker.stop_fill(order, symbol), "Notbremse an der Börse")
+                booked = True
+            else:
+                log.warning("Notbremse %s nicht mehr aktiv (%s) – wird neu gesetzt.", symbol, status or "unbekannt")
+        return booked
+
+    def release_exchange_stop(self, symbol: str) -> None:
+        """Notbremse vor einem eigenen Verkauf stornieren. Hat sie schon (teilweise) verkauft, wird das gebucht."""
+        pos = self.st["positions"][symbol]
+        order_id = str(pos["stop_order_id"])
+        order = self.broker.cancel_order(symbol, order_id)
+        if order is None or order.get("filled") is None or order.get("status") not in ("canceled", "closed", "expired",
+                                                                                         "rejected"):
+            order = self.broker.get_order(symbol, order_id)
+        if order is not None and order.get("status") == "open":
+            raise ExchangeProblem(f"Notbremse {symbol} ließ sich noch nicht stornieren")
+        pos["stop_order_id"] = None
+        pos["ex_stop_state"] = None
+        self.store.save()
+        if order is not None and float(order.get("filled") or 0.0) > 0:
+            self.book_sell(symbol, self.broker.stop_fill(order, symbol), "Notbremse an der Börse")
 
     # ------------------------------------------------------------------ Offene Orders nach Absturz klären
 
@@ -435,6 +568,11 @@ class Bot:
         if market is None:
             self.alert(f"market-{symbol}", f"❗ {symbol}: Markt nicht gefunden – Verkauf unmöglich. Bitte von Hand prüfen.")
             return False
+        if pos.get("stop_order_id"):
+            self.release_exchange_stop(symbol)    # die Coins sind bei Binance gesperrt, solange die Notbremse liegt
+            pos = self.st["positions"].get(symbol)
+            if not pos:
+                return True                       # die Notbremse hatte schon alles verkauft
         self.refresh()
         mark = self.prices.get(symbol) or pos["entry_price"]
         # Eigene Reste früherer Trades mitverkaufen (Binance zieht die Kaufgebühr vom Coin ab, dadurch bleibt beim
@@ -484,7 +622,7 @@ class Bot:
         else:
             del st["positions"][symbol]
             st["dust"][symbol] = max(0.0, pos["amount"] + dust_before - sold)   # Rest unter der Schrittweite
-            if pos.get("kind") == "dip" and reason == "Stop" and self.s.dip_cooldown_hours > 0:
+            if pos.get("kind") == "dip" and reason in STOP_REASONS and self.s.dip_cooldown_hours > 0:
                 st["dip_cooldown"][symbol] = self.now_ms() + int(self.s.dip_cooldown_hours * 3_600_000)
         trade = self._trade_record(symbol, pos, sold, cost_part, proceeds, fill.price, reason)
         st["closed"] = (st["closed"] + [trade])[-500:]
@@ -505,7 +643,9 @@ class Bot:
                 f"Ergebnis: {signed(pnl)} {self.q} ({pct(pnl / cost_part * 100 if cost_part else 0.0)})"]
         if partial:
             text.append(f"Teilverkauf – Rest {qty(remaining)} {coin(symbol)} bleibt offen.")
-        if symbol in st["dip_cooldown"] and pos.get("kind") == "dip" and reason == "Stop":
+        if reason.startswith("Notbremse"):
+            text.append("Die Stop-Order lag direkt bei Binance und hat ausgelöst.")
+        if symbol in st["dip_cooldown"] and pos.get("kind") == "dip" and reason in STOP_REASONS:
             text.append(f"{coin(symbol)}: {de(self.s.dip_cooldown_hours, 0)} h kein neuer Crash-Kauf (Schutz vor Totalabsturz).")
         text.append(f"Kapital jetzt: {de(self.equity)} {self.q}")
         self.tg.send("\n".join(text))
@@ -791,6 +931,8 @@ class Bot:
         self.store.save()
         if position["selftest"]:
             return
+        self.ensure_exchange_stop_safely(symbol)
+        guard = self.ex_stop_text(position)
         stop_pct = (position["stop"] / entry - 1) * 100
         if kind == "dip":
             self.tg.send("\n".join([
@@ -799,7 +941,7 @@ class Bot:
                 f"Verkauf um {self.when(deadline)} · Notstop {price_text(position['stop'])} ({pct(stop_pct)})",
                 f"Risiko bis zum Notstop: ca. {de(position['risk'])} {self.q} "
                 f"({de(position['risk'] / max(self.equity, 1e-9) * 100, 1)} % des Kapitals)",
-            ] + ([f"Gebühr: {fill.fee_note}"] if fill.fee_note else [])))
+            ] + ([guard] if guard else []) + ([f"Gebühr: {fill.fee_note}"] if fill.fee_note else [])))
             return
         target_pct = (position["target"] / entry - 1) * 100
         self.tg.send("\n".join([
@@ -810,7 +952,7 @@ class Bot:
             f"Spätestens verkaufen: {self.when(deadline)}",
             f"Risiko bis zum Stop: ca. {de(position['risk'])} {self.q} "
             f"({de(position['risk'] / max(self.equity, 1e-9) * 100, 1)} % des Kapitals)",
-        ] + ([f"Gebühr: {fill.fee_note}"] if fill.fee_note else [])))
+        ] + ([guard] if guard else []) + ([f"Gebühr: {fill.fee_note}"] if fill.fee_note else [])))
 
     def selftest(self) -> None:
         """Einmal beim ersten Echtgeld-Start: kleinstmöglicher Kauf und sofortiger Verkauf – beweist den Order-Weg."""
@@ -896,6 +1038,9 @@ class Bot:
             else:
                 lines.append(f"   Stop {price_text(pos['stop'])} · Ziel {price_text(pos['target'])} · bis "
                              f"{self.when(int(pos['deadline_ms']))}")
+            guard = self.ex_stop_text(pos)
+            if guard:
+                lines.append(f"   {guard}")
         trades = [t for t in st["closed"] if not t.get("selftest")]
         wins = sum(1 for t in trades if t["pnl"] > 0)
         lines.append(f"Abgeschlossen: {len(trades)} Trades ({wins} Gewinner) · {signed(sum(t['pnl'] for t in trades))} "
@@ -1027,16 +1172,26 @@ def run_check(settings: Settings, broker: Broker, telegram: Telegram) -> int:
     ok = True
     q = settings.quote
     print(f"Modus: {'ECHTGELD (live)' if settings.live else 'PAPIER (Simulation mit echten Kursen)'}")
+    wanted = tuple(dict.fromkeys(settings.coins + (settings.dip_coins if settings.dip_enabled else ())))
     try:
-        symbols, missing = broker.load_markets(settings.coins)
+        found, _ = broker.load_markets(wanted)
     except (ExchangeProblem, AuthProblem) as exc:
         print(f"✘ Binance nicht erreichbar: {exc}")
         return 1
+    symbols = [x for x in found if coin(x) in settings.coins]
+    missing = [c for c in settings.coins if f"{c}/{q}" not in found]
     print(f"✔ Binance erreichbar: {len(symbols)} Coins mit {q}-Markt"
           + (f" (ohne Markt, werden übersprungen: {', '.join(missing)})" if missing else ""))
     if not symbols:
         print(f"✘ Kein einziger Coin hat einen {q}-Markt – QUOTE in der .env prüfen.")
         return 1
+    if settings.dip_enabled:
+        dips = [coin(x) for x in found if coin(x) in settings.dip_coins]
+        print(f"✔ Crash-Kauf: {len(dips)} Coins ({', '.join(dips)})")
+    if settings.exchange_stop:
+        blocked = [coin(x) for x in found if not broker.supports_stop_limit(x)]
+        print(f"✔ Notbremse bei Binance: Stop-Orders möglich für {len(found) - len(blocked)} von {len(found)} Coins"
+              + (f" (nicht für {', '.join(blocked)} – dort gilt nur der Stop im Bot)" if blocked else ""))
     try:
         balances = broker.balances()
     except AuthProblem as exc:

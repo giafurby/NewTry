@@ -110,6 +110,14 @@ Mindestgrößen) und Trade für Trade mit der Simulation verglichen:
 | 07–09/2024 (Crash 5. August) | 16 / 16 Trades, z. B. ZEC +48,8 % / +48,8 %, XRP +32,9 % / +32,8 % | 7 / 7 Trades, z. B. BNB −4,5 % / −4,6 % |
 | 05–06/2021 (Crash 19. Mai) | 7 / 7 Trades, z. B. ETH +40,3 % / +40,2 % | 67 / 68 Trades, Ø +1,25 % / +1,67 % |
 
+Mit eingeschalteter Notbremse bei Binance sind die Trades identisch (07–09/2024: 26 Notbremsen gesetzt, 23 vor dem eigenen
+Verkauf storniert, keine fälschlich ausgelöst).
+
+**Ausfall-Test** (`outage.py`): Der Bot fällt am 19.05.2021 um 00:00 UTC für 24 Stunden aus, mitten im Crash an diesem Tag.
+Offen war eine BCH-Position (Einstieg 1.087,75). BCH fiel in der Zeit bis auf 490 (−55 %) und stand beim Neustart bei 694,50
+(−36 %). Die Notbremse bei Binance hat bei Ø 967,32 verkauft: **−11,2 %**. Nach dem Neustart war der Verkauf richtig gebucht,
+ohne Fehlmeldung als Einzahlung.
+
 Der Abgleich hat zwei Fehler gefunden, die jetzt behoben sind: einen im Replay-Aufbau (Zeitstempel) und einen in der ersten
 Kombi-Simulation (Zeit-Stop der Trend-Regel 5 statt 20 Tage). Die Zahlen oben sind die korrigierten.
 
@@ -137,7 +145,8 @@ python -I research/dip_stress.py /tmp/kurse/cache research   # 2. Einbruch-Härt
 python -I research/trend.py /tmp/kurse/cache            # 3. Trend und Momentum
 python -I research/robust.py /tmp/kurse/cache research  # 4. Kombination und Stabilität
 python -I research/final.py /tmp/kurse/cache research   # 4. Endgültige Einstellung, LUNA-Szenario
-python -I research/replay.py /tmp/kurse/cache research . 2024-07-01 2024-10-01   # 5. Bot gegen Simulation
+python -I research/replay.py /tmp/kurse/cache research . 2024-07-01 2024-10-01 notbremse   # 5. Bot gegen Simulation
+python -I research/outage.py /tmp/kurse/cache . 2021-05-01 2021-05-19 24          # 5. Ausfall mitten im Crash
 ```
 
 `python -I` und ein Arbeitsordner außerhalb der Daten sind Absicht: Heruntergeladene Dateien werden nie als Code ausgeführt.

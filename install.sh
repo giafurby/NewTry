@@ -11,7 +11,7 @@
 #   --keys    Binance-Schlüssel neu eingeben
 #
 # Ablauf: Code holen → .env (Schlüssel aus dem alten Bot übernehmen) → Python-Umgebung → Startklar-Prüfung →
-# erst wenn die Prüfung bestanden ist: alten Bot abschalten und den neuen Dienst starten.
+# erst wenn die Prüfung bestanden ist: alten Bot abschalten, neuen Dienst und seinen Wächter (alle 5 Minuten) starten.
 # Scheitert die Prüfung, bleibt der alte Bot unberührt.
 # =============================================================================
 set -euo pipefail
@@ -107,8 +107,10 @@ enter_telegram() {
 
 # ----------------------------------------------------------------------------- 1. Code
 info "Hole den neuesten Stand von GitHub (${BRANCH}) …"
+MAINTENANCE="/var/lib/newtry-watchdog/wartung"     # der Wächter schweigt, solange das Update läuft
+mkdir -p "$(dirname "$MAINTENANCE")" && touch "$MAINTENANCE"
 tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+trap 'rm -rf "$tmp"; rm -f "$MAINTENANCE"' EXIT
 curl -fsSL "$TARBALL" | tar -xz -C "$tmp" --strip-components=1 || die "Download fehlgeschlagen (Internet?)."
 [[ -f "$tmp/bot.py" ]] || die "Download unvollständig."
 mkdir -p "$APP"
@@ -235,6 +237,11 @@ if ! systemctl is-active --quiet "$SERVICE"; then
   journalctl -u "$SERVICE" -n 40 --no-pager -o cat || true
   die "Der Bot läuft nicht – siehe Protokoll oben."
 fi
+cp "$APP/deploy/newtry-watchdog.service" /etc/systemd/system/newtry-watchdog.service
+cp "$APP/deploy/newtry-watchdog.timer" /etc/systemd/system/newtry-watchdog.timer
+systemctl daemon-reload
+systemctl enable --now newtry-watchdog.timer >/dev/null 2>&1
+ok "Wächter aktiv: prüft alle 5 Minuten, ob der Bot läuft, meldet sich per Telegram und startet ihn bei Bedarf neu."
 journalctl -u "$SERVICE" -n 12 --no-pager -o cat || true
 echo
 ok "NewTry LÄUFT · $([[ "$mode" == live ]] && echo "${R}ECHTGELD${N}" || echo "PAPIERMODUS")"
@@ -247,7 +254,9 @@ cat <<TEXT
   Auf dem Server:
     Läuft er?          systemctl is-active ${SERVICE}
     Live-Protokoll     journalctl -u ${SERVICE} -f        (beenden mit Strg+C)
-    Anhalten/Starten   systemctl stop ${SERVICE}  /  systemctl start ${SERVICE}
+    Anhalten           systemctl disable --now ${SERVICE}   (nur "stop" reicht nicht: dann startet ihn der Wächter neu)
+    Wieder starten     systemctl enable --now ${SERVICE}
+    Wächter läuft?     systemctl list-timers newtry-watchdog.timer
     Update             bash /root/newtry-install.sh
     Papier/Echtgeld    bash /root/newtry-install.sh --paper   /   --live
 TEXT

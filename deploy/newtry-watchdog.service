@@ -1,0 +1,8 @@
+# Wächter für den NewTry-Bot (wird von newtry-watchdog.timer alle 5 Minuten gestartet)
+[Unit]
+Description=Waechter fuer den NewTry-Bot
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /root/newtry/deploy/watchdog.sh

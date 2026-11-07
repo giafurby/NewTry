@@ -1,0 +1,11 @@
+# Startet den Wächter 5 Minuten nach dem Hochfahren und danach alle 5 Minuten
+[Unit]
+Description=Waechter fuer den NewTry-Bot (alle 5 Minuten)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+Unit=newtry-watchdog.service
+
+[Install]
+WantedBy=timers.target

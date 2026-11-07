@@ -25,6 +25,8 @@ keine API-Kosten, keine erfundenen Antworten, jede Entscheidung nachrechenbar.
 
 | Grenze | Standard | Wirkung |
 |---|---|---|
+| **Notbremse bei Binance** | nach jedem Kauf | eine Stop-Order liegt **direkt an der Börse**, 1 % unter dem Stop des Bots. Sie verkauft auch dann, wenn Bot, Server oder Internet ausfallen. Läuft der Bot, verkauft er selbst zuerst und storniert sie vorher. |
+| **Wächter** | alle 5 Minuten | meldet per Telegram, wenn der Bot nicht läuft, hängt oder die Festplatte voll ist, und startet ihn neu (höchstens einmal pro Stunde) |
 | Notstopp | −40 % vom Höchststand | **alles verkaufen und anhalten**, weiter nur mit `/weiter` (der größte Rückgang im Rückblick: 26 %) |
 | Sperre nach Notstop | 24 h je Coin (Crash-Kauf) | ein Coin, der wie LUNA auf null fällt, wird nicht immer wieder nachgekauft |
 | Crash-Käufe gleichzeitig | höchstens 3 | im marktweiten Crash (März 2020) nie mehr als 60 % des Kapitals im Fall |
@@ -81,12 +83,14 @@ Dazu kommen von selbst: jeder Kauf und Verkauf, jeder Einbruch ab −10 % (⚡, 
 |---|---|
 | Läuft er? | `systemctl is-active newtry-bot` |
 | Live-Protokoll (Ende mit Strg+C) | `journalctl -u newtry-bot -f` |
-| Anhalten / Starten | `systemctl stop newtry-bot` / `systemctl start newtry-bot` |
+| Anhalten | `systemctl disable --now newtry-bot` (nur `stop` reicht nicht – dann startet ihn der Wächter neu) |
+| Wieder starten | `systemctl enable --now newtry-bot` |
+| Läuft der Wächter? | `systemctl list-timers newtry-watchdog.timer` |
 | Startklar-Prüfung | `cd /root/newtry && .venv/bin/python bot.py --check` |
 | Papier ↔ Echtgeld | `bash /root/newtry-install.sh --paper` / `bash /root/newtry-install.sh --live` |
 | Neue Binance-Schlüssel | `bash /root/newtry-install.sh --keys` |
 | Einstellungen ändern | `nano /root/newtry/.env`, danach `systemctl restart newtry-bot` |
-| Zurück zum alten Bot | `systemctl disable --now newtry-bot && systemctl enable --now trading-bot` |
+| Zurück zum alten Bot | `systemctl disable --now newtry-bot newtry-watchdog.timer && systemctl enable --now trading-bot` – vorher in der Binance-App die offenen Notbremsen (Stop-Orders) prüfen |
 
 Papier- und Echtgeld-Modus haben getrennte Gedächtnisse (`data/state-paper.json`, `data/state-live.json`), damit
 simulierte Positionen nie im echten Konto landen. Alle Einstellungen mit Erklärung stehen in `.env.example`.
@@ -107,8 +111,15 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt -r requiremen
 
 Die Tests laufen offline gegen eine simulierte Binance-Börse (`tests/fakes.py`): Kauf und Positionsgröße, Stop, Ziel,
 Zeit-Stop, Crash-Kauf mit 4-Stunden-Ausstieg und Sperre, Tageslimit, Notstopp, Ein- und Auszahlungen, Netzfehler nach
-ausgeführter Order, Absturz zwischen Order und Buchung, Funktionstest und Telegram-Befehle. Zusätzlich wurde der Bot-Code mit
-echten Kursen (07–09/2024 und 05–06/2021) gegen die Forschungs-Simulation geprüft: Trade für Trade dieselben Käufe.
+ausgeführter Order, Absturz zwischen Order und Buchung, Funktionstest, Telegram-Befehle, die Notbremse (setzen, vor dem
+eigenen Verkauf stornieren, Auslösen während der Bot aus ist, Kurslücke, Teilausführung, in der App storniert, Netzfehler beim
+Setzen, Neustart) und der Wächter (mit nachgebautem systemd). `tests/test_binance_ccxt.py` prüft mit dem echten ccxt-Code und
+Antworten im Binance-Format, welche Anfragen bei Binance ankämen.
+
+Zusätzlich wurde der Bot-Code mit echten Kursen (07–09/2024 und 05–06/2021) gegen die Forschungs-Simulation geprüft:
+Trade für Trade dieselben Käufe, mit und ohne Notbremse. Und ein Ausfall-Test (`research/outage.py`): Der Bot fällt am
+19.05.2021 für 24 Stunden aus, mitten im Crash. BCH fiel in der Zeit um bis zu 55 %, die Notbremse bei Binance hat bei −11 %
+verkauft, und nach dem Neustart war alles richtig gebucht.
 
 | Datei | Inhalt |
 |---|---|

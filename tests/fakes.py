@@ -44,6 +44,7 @@ class FakeExchange(SimulatedExchange):
         self.candles_15m: dict[str, list[list[float]]] = {}      # 15m-Kerzen je Symbol (Crash-Kauf)
         self.timeout_after_fill = False
         self.timeout_before_fill = False
+        self.timeout_after_stop = False
         self.create_calls = 0
         for symbol in prices:
             base, quote = symbol.split("/")
@@ -67,6 +68,12 @@ class FakeExchange(SimulatedExchange):
     def create_order(self, symbol: str, type: str, side: str, amount: float, price: Any = None,
                      params: Optional[dict[str, Any]] = None) -> dict[str, Any]:
         self.create_calls += 1
+        if type.upper() == "STOP_LOSS_LIMIT":
+            order = super().create_order(symbol, type, side, amount, price, params)
+            if self.timeout_after_stop:
+                self.timeout_after_stop = False
+                raise ccxt.RequestTimeout("binance POST /api/v3/order timed out")
+            return order
         if self.timeout_before_fill:
             raise ccxt.RequestTimeout("binance POST /api/v3/order timed out")
         order = super().create_order(symbol, type, side, amount, price, params)
@@ -111,6 +118,7 @@ def make_settings(tmp_path: Path, **overrides: Any) -> Settings:
         timezone="Europe/Berlin", paper_start_balance=150.0, data_dir=tmp_path / "data",
         dip_enabled=False, dip_coins=("ETH", "BTC", "SOL", "XRP"), dip_drop_pct=10.0, dip_position_pct=20.0,
         dip_max_positions=5, dip_stop_pct=15.0, dip_hold_hours=4.0, dip_cooldown_hours=24.0,
+        exchange_stop=False, exchange_stop_buffer_pct=1.0, exchange_stop_gap_pct=3.0,
     )
     return dataclasses.replace(base, **overrides)
 
@@ -168,3 +176,7 @@ def dip_candles(last_open_ts: int, drop: float, n: int = 40, price: float = 100.
     if include_open:
         rows.append([last_open_ts + DIP_TF, low, low * 1.002, low * 0.998, low, 5.0])
     return rows
+
+
+def open_stops(exchange: FakeExchange) -> list[dict]:
+    return [o for o in exchange.orders.values() if o["status"] == "open" and o.get("triggerPrice") is not None]

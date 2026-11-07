@@ -100,6 +100,14 @@ def test_run_check_reports_ready(tmp_path, capsys):
     assert "ohne Markt, werden übersprungen: DOGE" in out and "150,00 USDC frei" in out and "STARTKLAR" in out
 
 
+def test_run_check_reports_where_exchange_stops_work(tmp_path, capsys):
+    exchange = FakeExchange({"USDC": 150.0}, {"ETH/USDC": 100.0, "BTC/USDC": 100.0})
+    exchange.markets["BTC/USDC"]["info"] = {"orderTypes": ["LIMIT", "MARKET"]}
+    settings = make_settings(tmp_path, coins=("ETH", "BTC"), exchange_stop=True)
+    assert run_check(settings, Broker(exchange, "USDC", sleep=lambda _s: None), FakeTelegram()) == 0
+    assert "Stop-Orders möglich für 1 von 2 Coins (nicht für BTC" in capsys.readouterr().out
+
+
 def test_run_loop_handles_commands_and_stops_cleanly(tmp_path):
     exchange = FakeExchange({"USDC": 150.0}, {"ETH/USDC": 100.0, "BTC/USDC": 100.0, "SOL/USDC": 100.0,
                                               "XRP/USDC": 100.0})

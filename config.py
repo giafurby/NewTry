@@ -58,6 +58,9 @@ class Settings:
     dip_stop_pct: float           # Notstop unter dem Einstieg
     dip_hold_hours: float         # nach so vielen Stunden wird verkauft
     dip_cooldown_hours: float     # Sperre für den Coin nach einem Notstop
+    exchange_stop: bool           # Notbremse: Stop-Order direkt bei Binance, hält auch ohne Bot und Server
+    exchange_stop_buffer_pct: float   # so viel % unter dem Bot-Stop löst die Notbremse aus
+    exchange_stop_gap_pct: float      # so viel % unter dem Auslöser liegt ihr Mindestpreis
     selftest_trade: bool          # einmaliger Funktionstest (Kauf + Verkauf ~7 USDC) beim ersten Echtgeld-Start
     scan_reports: bool            # nach jeder 4h-Prüfung eine stille Telegram-Nachricht
     report_hour: int              # Uhrzeit des Tagesberichts (Ortszeit)
@@ -144,6 +147,9 @@ def load_settings(env_path: Path | str = ".env", environ: dict[str, str] | None 
         dip_stop_pct=_number(values, "DIP_STOP_PCT", 15.0, 2.0, 50.0, errors),
         dip_hold_hours=_number(values, "DIP_HOLD_HOURS", 4.0, 0.5, 72.0, errors),
         dip_cooldown_hours=_number(values, "DIP_COOLDOWN_HOURS", 24.0, 0.0, 336.0, errors),
+        exchange_stop=_flag(values, "EXCHANGE_STOP", True, errors),
+        exchange_stop_buffer_pct=_number(values, "EXCHANGE_STOP_BUFFER_PCT", 1.0, 0.1, 5.0, errors),
+        exchange_stop_gap_pct=_number(values, "EXCHANGE_STOP_GAP_PCT", 3.0, 0.5, 20.0, errors),
         selftest_trade=_flag(values, "SELFTEST_TRADE", True, errors),
         scan_reports=_flag(values, "SCAN_REPORTS", True, errors),
         report_hour=int(_number(values, "REPORT_HOUR", 9, 0, 23, errors)),
@@ -168,5 +174,5 @@ _KEYS = {
     "RISK_PER_TRADE_PCT", "MAX_POSITIONS", "MAX_POSITION_PCT", "DAILY_LOSS_LIMIT_PCT", "MAX_DRAWDOWN_PCT",
     "SELFTEST_TRADE", "SCAN_REPORTS", "REPORT_HOUR", "TIMEZONE", "PAPER_START_BALANCE", "DATA_DIR",
     "DIP_ENABLED", "DIP_COINS", "DIP_DROP_PCT", "DIP_POSITION_PCT", "DIP_MAX_POSITIONS", "DIP_STOP_PCT",
-    "DIP_HOLD_HOURS", "DIP_COOLDOWN_HOURS",
+    "DIP_HOLD_HOURS", "DIP_COOLDOWN_HOURS", "EXCHANGE_STOP", "EXCHANGE_STOP_BUFFER_PCT", "EXCHANGE_STOP_GAP_PCT",
 }
