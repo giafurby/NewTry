@@ -3,7 +3,9 @@
 Ein Neuanfang nach *azubiassist*: zwei auf echten Binance-Kursen 2017–2026 geprüfte Regeln, harte Verlustgrenzen, und er
 **handelt wirklich**. Er übernimmt Binance- und Telegram-Schlüssel automatisch vom alten Bot auf dem Server.
 Wie die Regeln ausgewählt wurden (640 Daytrading-Varianten, Trend, Momentum, Härtetests), steht mit allen Zahlen in
-**[research/ERGEBNISSE.md](research/ERGEBNISSE.md)**.
+**[research/ERGEBNISSE.md](research/ERGEBNISSE.md)**. Die zweite Forschungsrunde hat beide Projekte zusammengeführt und
+alle Kandidaten (515 Varianten, neue Strategiefamilien, die Gemini-Vorschläge) unter identischen, realistischen
+Bedingungen verglichen: **[lab/ERGEBNISSE_V2.md](lab/ERGEBNISSE_V2.md)**. Ergebnis: Diese beiden Regeln bleiben.
 
 ## Was er macht
 
@@ -34,19 +36,24 @@ keine API-Kosten, keine erfundenen Antworten, jede Entscheidung nachrechenbar.
 | Doppelte Orders | ausgeschlossen | jede Order hat eine eigene Nummer; nach Netzfehler oder Absturz wird bei Binance nachgesehen, bevor neu gehandelt wird |
 | Ein-/Auszahlungen | erkannt | zählen weder als Gewinn noch als Verlust und lösen keinen Notstopp aus |
 | Fremde Bestände | unangetastet | der Bot verkauft nur, was er selbst gekauft hat |
+| Ausführungswächter | jeder Kauf | misst, ob der Bot so günstig kauft wie die Simulation (Kaufkurs gegen den Signal-Schluss). Kauft er im Crash über 10 Käufe deutlich schlechter, wird **nur der Crash-Kauf** ausgesetzt – sein Vorteil wäre dann aufgezehrt. Weiter mit `/weiter`. |
+| Vorwärtstest | nach jedem Verkauf | vergleicht die letzten 30 Trades je Regel mit dem Rückblick und meldet, wenn es schlechter läuft als in 95 % aller vergangenen Phasen (nur Meldung) |
+| Schlüssel-Prüfung | täglich (Echtgeld) | warnt, wenn der API-Schlüssel auszahlen darf oder nicht mehr handeln darf |
 | Funktionstest | einmal beim ersten Echtgeld-Start | Kauf und sofortiger Verkauf für ca. 7 USDC beweisen, dass Schlüssel und Orders funktionieren (Kosten: wenige Cent) |
 
 ## Ehrliche Erwartung
 
-* **Rückblick** 08/2017–10/2026, 10 Coins, mit doppelt so hohen Kosten wie normal: **+77 % pro Jahr**, größter Rückgang
-  **25 %**. Auf den bei der Auswahl nicht benutzten Daten 2023–2026: +54 % pro Jahr.
+* **Rückblick, realistisch gerechnet** (2018–10/2026, Kauf 1 Minute nach Kerzenschluss, Rückgang in jeder 15m-Kerze,
+  doppelte Kosten 0,30 % je Seite): **+60 % pro Jahr**, größter Rückgang **28 %**. Die früher genannten +77 % enthielten
+  2017 (mit einem nicht handelbaren Fehlprint) und Käufe in der Sekunde des Kerzenschlusses
+  ([Überleitung](lab/ERGEBNISSE_V2.md#3-prüfung-der-vorhandenen-backtests)).
 * **Viel handeln kostet Geld:** Ein Bot, der seit 01/2025 den ganzen Tag gehandelt hätte (10–36 Trades am Tag), hätte aus
   159,69 USDC nach Gebühren **0 bis 0,57 USDC** gemacht. NewTry im selben Zeitraum: 216,59 USDC (`research/active.py`).
 * **Das ist ein bestmöglicher Fall.** Coins, die gestorben sind, fehlen im Datensatz. Die großen Jahre (2020, 2021, 2024)
   waren Bullenmärkte.
-* **Seit Anfang 2025 lief es zäh:** mit doppelten Kosten etwa ±0, mit normalen Kosten +36 % in 22 Monaten. Wer jetzt
-  startet, startet in genau so einer Phase.
-* 38 % der Monate waren im Minus, der schlechteste mit −11,6 %. Rückgänge von 25–40 % muss man aushalten können.
+* **Seit Anfang 2025 lief es zäh:** realistisch gerechnet etwa **+8 % pro Jahr**. Wer jetzt startet, startet in genau so
+  einer Phase. Der Crash-Kauf lag 2025/26 im Schnitt bei ≈ 0 je Trade – darum der Ausführungswächter.
+* 35 % der Monate waren im Minus, der schlechteste mit −15 % (2020–10/2026, realistisch gerechnet). Rückgänge von 25–40 % muss man aushalten können.
 * Mit rund 150 € Einsatz bedeutet selbst ein sehr gutes Jahr ein paar Dutzend bis wenige hundert Euro. Setze nur Geld ein,
   dessen Verlust du verkraftest.
 
@@ -126,7 +133,9 @@ verkauft, und nach dem Neustart war alles richtig gebucht.
 | Datei | Inhalt |
 |---|---|
 | `strategy.py` | die beiden Regeln: Kennzahlen, Kaufsignale, Ausstiege (reine Rechnung) |
-| `research/` | Datenprüfung, alle Auswertungen und der Ergebnisbericht `ERGEBNISSE.md` |
+| `guards.py` | Wächter: Ausführung, Vorwärtstest, Schlüssel-Prüfung (reine Rechnung, Referenzwerte aus `lab/`) |
+| `research/` | Forschungsrunde 1: Datenprüfung, alle Auswertungen und der Ergebnisbericht `ERGEBNISSE.md` |
+| `lab/` | Forschungsrunde 2: gemeinsamer Maßstab (`MASSSTAB.md`), Simulationsmaschine, alle Familien, Bericht `ERGEBNISSE_V2.md` |
 | `bot.py` | Hauptschleife, Kaufen, Verkaufen, Grenzen, Telegram-Befehle, `--check` |
 | `exchange.py` | Binance über ccxt und eine Simulation mit derselben Schnittstelle (Papiermodus, Tests) |
 | `state.py` · `notifier.py` · `config.py` | Gedächtnis (JSON) · Telegram · Einstellungen |
