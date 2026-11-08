@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 from zoneinfo import ZoneInfo
 
+import guards
 import strategy
 from config import ConfigError, Settings, load_settings
 from exchange import (AuthProblem, Broker, ExchangeProblem, Fill, OrderRejected, OrderUnclear, PaperExchange,
@@ -636,6 +637,9 @@ class Bot:
                          f"sofort wieder verkauft. Ergebnis (Gebühren und Kursdifferenz): {signed(pnl, 4)} {self.q}.\n"
                          "Schlüssel, Handelsrecht und Order-Weg funktionieren. Ab jetzt handelt die Regel.")
             return
+        warning = guards.forward_alert(st, pos.get("kind", "trend"))
+        if warning:
+            self.store.save()
         icon = "✅" if pnl >= 0 else "🔻"
         label = "Crash-Kauf" if pos.get("kind") == "dip" else "Trend"
         text = [f"{icon} VERKAUF {coin(symbol)} ({label}) – {reason}",
@@ -649,6 +653,8 @@ class Bot:
             text.append(f"{coin(symbol)}: {de(self.s.dip_cooldown_hours, 0)} h kein neuer Crash-Kauf (Schutz vor Totalabsturz).")
         text.append(f"Kapital jetzt: {de(self.equity)} {self.q}")
         self.tg.send("\n".join(text))
+        if warning:
+            self.tg.send(warning)
 
     def book_out(self, symbol: str, pos: dict[str, Any], reason: str, mark: float, sold_outside: bool = False) -> None:
         """
@@ -786,6 +792,8 @@ class Bot:
             return "nicht gekauft – Notstopp aktiv (/weiter)"
         if st["paused"]:
             return "nicht gekauft – pausiert (/weiter)"
+        if st.get("dip_suspended"):
+            return "nicht gekauft – Crash-Kauf ausgesetzt (Käufe schlechter als simuliert, /weiter)"
         if symbol in st["positions"]:
             return "nicht gekauft – Coin schon im Bestand"
         if st["entered_dip"].get(symbol) == check.candle_ts:
@@ -812,7 +820,8 @@ class Bot:
         return self.execute_buy(symbol, amount, {"kind": "dip", "stop_fraction": s.dip_stop_pct / 100,
                                                  "target_fraction": None, "candle_ts": check.candle_ts,
                                                  "hold_ms": s.dip_hold_hours * 3_600_000,
-                                                 "change_pct": check.change_pct, "atr": 0.0})
+                                                 "change_pct": check.change_pct, "atr": 0.0,
+                                                 "signal_price": check.close})
 
     def report_scan(self, candle_close: int, checks: list[strategy.Check], failed: list[str]) -> None:
         signals = [c for c in checks if c.signal]
@@ -870,7 +879,8 @@ class Bot:
             return f"nicht gekauft – zu wenig {self.q} frei ({de(self.quote_free)} {self.q})"
         return self.execute_buy(symbol, amount, {"kind": "trend", "stop_fraction": check.stop_fraction,
                                                  "target_fraction": check.target_fraction,
-                                                 "candle_ts": check.candle_ts, "atr": check.atr})
+                                                 "candle_ts": check.candle_ts, "atr": check.atr,
+                                                 "signal_price": check.close})
 
     def execute_buy(self, symbol: str, amount: float, info: dict[str, Any]) -> str:
         market = self.broker.ensure_market(symbol)
@@ -919,6 +929,12 @@ class Bot:
             "deadline_ms": deadline, "opened_at": self.iso(), "candle_ts": candle,
             "risk": cost * stop_fraction, "order_id": fill.order_id, "selftest": bool(info.get("selftest")),
         }
+        slip = None
+        if not position["selftest"] and info.get("signal_price"):
+            slip = guards.record_entry(st, kind, float(info["signal_price"]), entry)
+            if slip is not None:
+                position["signal_price"] = float(info["signal_price"])
+                position["entry_slippage_pct"] = round(slip, 3)
         st["positions"][symbol] = position
         if candle and kind == "dip":
             st["entered_dip"][symbol] = int(candle)
@@ -934,6 +950,8 @@ class Bot:
         self.ensure_exchange_stop_safely(symbol)
         guard = self.ex_stop_text(position)
         stop_pct = (position["stop"] / entry - 1) * 100
+        slip_text = [] if slip is None else [f"Kaufkurs {pct(slip, 2)} gegenüber dem Signal-Schluss "
+                                             f"(Simulation im Mittel {pct(guards.REFERENCE[kind]['entry_drift_pct'], 2)})"]
         if kind == "dip":
             self.tg.send("\n".join([
                 f"🟢 CRASH-KAUF {coin(symbol)} ({pct(float(info.get('change_pct') or 0.0))} in 4 h)",
@@ -941,7 +959,8 @@ class Bot:
                 f"Verkauf um {self.when(deadline)} · Notstop {price_text(position['stop'])} ({pct(stop_pct)})",
                 f"Risiko bis zum Notstop: ca. {de(position['risk'])} {self.q} "
                 f"({de(position['risk'] / max(self.equity, 1e-9) * 100, 1)} % des Kapitals)",
-            ] + ([guard] if guard else []) + ([f"Gebühr: {fill.fee_note}"] if fill.fee_note else [])))
+            ] + slip_text + ([guard] if guard else []) + ([f"Gebühr: {fill.fee_note}"] if fill.fee_note else [])))
+            self.check_dip_execution()
             return
         target_pct = (position["target"] / entry - 1) * 100
         self.tg.send("\n".join([
@@ -952,7 +971,20 @@ class Bot:
             f"Spätestens verkaufen: {self.when(deadline)}",
             f"Risiko bis zum Stop: ca. {de(position['risk'])} {self.q} "
             f"({de(position['risk'] / max(self.equity, 1e-9) * 100, 1)} % des Kapitals)",
-        ] + ([guard] if guard else []) + ([f"Gebühr: {fill.fee_note}"] if fill.fee_note else [])))
+        ] + slip_text + ([guard] if guard else []) + ([f"Gebühr: {fill.fee_note}"] if fill.fee_note else [])))
+
+    def check_dip_execution(self) -> None:
+        """Ausführungswächter: Kauft der Bot im Crash deutlich schlechter als simuliert, wird nur der Crash-Kauf ausgesetzt."""
+        if self.st.get("dip_suspended"):
+            return
+        verdict = guards.dip_execution_verdict(self.st, self.s.dip_max_slippage_pct, self.s.slippage_window)
+        if not verdict:
+            return
+        self.st["dip_suspended"] = verdict
+        self.store.save()
+        self.tg.send(f"⚠️ Crash-Kauf ausgesetzt: {verdict}. Der Vorteil dieser Regel lebt davon, direkt nach dem Einbruch "
+                     "günstig zu kaufen; so ist er aufgezehrt. Offene Positionen laufen normal weiter, der Trend handelt "
+                     "unverändert. Wieder einschalten: /weiter")
 
     def selftest(self) -> None:
         """Einmal beim ersten Echtgeld-Start: kleinstmöglicher Kauf und sofortiger Verkauf – beweist den Order-Weg."""
@@ -1001,6 +1033,15 @@ class Bot:
         if recent:
             lines.append("Letzte 24 Stunden: " + "; ".join(f"{coin(t['symbol'])} {signed(t['pnl'])}" for t in recent))
         self.tg.send("\n".join(lines))
+        self.check_key_hygiene()
+
+    def check_key_hygiene(self) -> None:
+        """Einmal am Tag (Echtgeld): Darf der Schlüssel auszahlen? Darf er noch handeln?"""
+        if not self.s.live:
+            return
+        problems = guards.key_problems(self.broker.api_permissions())
+        if problems:
+            self.tg.send("⚠️ Schlüssel-Prüfung: " + " ".join(problems))
 
     def summary_lines(self) -> list[str]:
         st, s = self.st, self.s
@@ -1049,6 +1090,24 @@ class Bot:
             part = [t for t in trades if t.get("kind", "trend") == kind]
             if part:
                 lines.append(f"   {label}: {len(part)} Trades, {signed(sum(t['pnl'] for t in part))} {self.q}")
+        lines.extend(self.guard_lines())
+        return lines
+
+    def guard_lines(self) -> list[str]:
+        """Wächter: Passt die Wirklichkeit noch zur Simulation? (guards.py)"""
+        lines = []
+        st = self.st
+        for kind, label in (("trend", "Trend"), ("dip", "Crash-Kauf")):
+            values = list((st.get("slippage") or {}).get(kind) or [])
+            if values:
+                recent = values[-self.s.slippage_window:]
+                lines.append(f"Ausführung {label}: Käufe im Ø {pct(sum(recent) / len(recent), 2)} gegenüber dem Signal-"
+                             f"Schluss (letzte {len(recent)}; Simulation {pct(guards.REFERENCE[kind]['entry_drift_pct'], 2)})")
+            status = guards.forward_status(st.get("closed") or [], kind)
+            if status:
+                lines.append(guards.forward_line(status))
+        if st.get("dip_suspended"):
+            lines.append(f"⚠️ Crash-Kauf ausgesetzt: {st['dip_suspended']} (/weiter)")
         return lines
 
     # ------------------------------------------------------------------ Telegram-Befehle
@@ -1130,15 +1189,20 @@ class Bot:
     def cmd_resume(self) -> None:
         st = self.st
         was_halted = st["halted"]
+        was_suspended = bool(st.get("dip_suspended"))
         st["paused"] = False
         st["halted"] = False
         st["halt_reason"] = ""
+        if was_suspended:
+            st["dip_suspended"] = ""
+            st.setdefault("slippage", {})["dip"] = []      # neu messen, sonst setzt der Wächter sofort wieder aus
         if was_halted:
             self.refresh()
             st["peak_equity"] = self.equity      # neuer Bezugspunkt, sonst löst der Notstopp sofort wieder aus
         self.store.save()
         self.tg.send("▶️ Weiter: Der Bot kauft wieder bei Signalen." + (
-            f" Neuer Höchststand für den Notstopp: {de(self.equity)} {self.q}." if was_halted else ""))
+            f" Neuer Höchststand für den Notstopp: {de(self.equity)} {self.q}." if was_halted else "") + (
+            " Der Crash-Kauf ist wieder an; seine Ausführung wird neu gemessen." if was_suspended else ""))
 
     def cmd_sell_all(self) -> None:
         if not self.st["positions"]:

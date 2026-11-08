@@ -1,0 +1,5 @@
+# Nur für das Forschungslabor (lab/), nicht für den Bot
+numpy>=1.26
+pandas>=2.1
+pyarrow>=14
+numba>=0.59

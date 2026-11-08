@@ -2,6 +2,11 @@
 
 Stand: 07.11.2026. Alle Zahlen lassen sich mit den Skripten in diesem Ordner nachrechnen (Anleitung ganz unten).
 
+> **Nachtrag 08.11.2026:** Die zweite Forschungsrunde ([lab/ERGEBNISSE_V2.md](../lab/ERGEBNISSE_V2.md)) hat diese Zahlen
+> exakt reproduziert und unter realistischeren Bedingungen neu gerechnet (ohne 2017, Kauf 1 Minute nach Kerzenschluss,
+> Rückgang in jeder Kerze): +60 % statt +77 % pro Jahr bei 0,30 % Kosten, Rückgang 28 % statt 25 %, seit 2025 ≈ +8 % pro
+> Jahr. Die Regeln selbst bleiben die besten geprüften Kandidaten.
+
 ## Kurz
 
 * **Allgemeines Daytrading verliert.** Nach Gebühren verlieren Rücksetzer-, Ausbruchs- und RSI-Regeln auf 15-Minuten- und

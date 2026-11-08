@@ -67,6 +67,8 @@ class Settings:
     timezone: str
     paper_start_balance: float
     data_dir: Path
+    dip_max_slippage_pct: float = 0.35   # Crash-Kauf aussetzen, wenn Käufe so viel schlechter sind als simuliert (0 = aus)
+    slippage_window: int = 10            # … gemessen über so viele Crash-Käufe
 
     @property
     def live(self) -> bool:
@@ -156,6 +158,8 @@ def load_settings(env_path: Path | str = ".env", environ: dict[str, str] | None 
         timezone=values.get("TIMEZONE", "Europe/Berlin").strip() or "Europe/Berlin",
         paper_start_balance=_number(values, "PAPER_START_BALANCE", 150.0, 10.0, 1_000_000.0, errors),
         data_dir=Path(values.get("DATA_DIR", "").strip() or env_path.resolve().parent / "data"),
+        dip_max_slippage_pct=_number(values, "DIP_MAX_SLIPPAGE_PCT", 0.35, 0.0, 5.0, errors),
+        slippage_window=int(_number(values, "SLIPPAGE_WINDOW", 10, 3, 50, errors)),
     )
     if settings.telegram_token and not settings.telegram_chat_id:
         errors.append("TELEGRAM_CHAT_ID fehlt (TELEGRAM_BOT_TOKEN ist gesetzt).")
@@ -175,4 +179,5 @@ _KEYS = {
     "SELFTEST_TRADE", "SCAN_REPORTS", "REPORT_HOUR", "TIMEZONE", "PAPER_START_BALANCE", "DATA_DIR",
     "DIP_ENABLED", "DIP_COINS", "DIP_DROP_PCT", "DIP_POSITION_PCT", "DIP_MAX_POSITIONS", "DIP_STOP_PCT",
     "DIP_HOLD_HOURS", "DIP_COOLDOWN_HOURS", "EXCHANGE_STOP", "EXCHANGE_STOP_BUFFER_PCT", "EXCHANGE_STOP_GAP_PCT",
+    "DIP_MAX_SLIPPAGE_PCT", "SLIPPAGE_WINDOW",
 }

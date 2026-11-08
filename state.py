@@ -37,6 +37,9 @@ DEFAULTS: dict[str, Any] = {
     "fees_paid": 0.0,
     "selftest_done": False,
     "last_report_day": None,
+    "slippage": {},             # Regel -> Kauf-Abweichung in % vom Signal-Schluss (die letzten 50; guards.py)
+    "dip_suspended": "",        # Grund, warum der Crash-Kauf ausgesetzt ist (Ausführungswächter); leer = aktiv
+    "forward_warned": {},       # Regel -> Vorwärtstest-Warnung schon gesendet
 }
 
 
