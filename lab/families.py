@@ -116,12 +116,12 @@ def _const(m, v):
 
 
 def _trades(ctx, sig, prio, stopf, tgtf, trailf, hold, size_mode, size_a, size_cap, kmax, cost, start, end,
-            cooldown=0, min_frac=0.02, part_frac=0.0, part_tgt=0.0, exit_sig=None):
+            cooldown=0, min_frac=0.02, part_frac=0.0, part_tgt=0.0, exit_sig=None, extend=False):
     m = ctx.m
     eq, tr = engine.sim_trades(m.O, m.H, m.L, m.CF, m.EP, sig, prio, stopf, tgtf, trailf, int(hold), float(part_frac),
                                float(part_tgt), int(size_mode), float(size_a), float(size_cap), int(kmax), float(cost),
                                int(cooldown), int(start), int(end), float(min_frac),
-                               _no(m) if exit_sig is None else exit_sig)
+                               _no(m) if exit_sig is None else exit_sig, bool(extend))
     return eq, tr
 
 
@@ -389,6 +389,172 @@ def run_tranche(ctx, p, cost, start, end, pos_frac=0.30, kmax=3):
     return eq, tr
 
 
+# ====================================================================== Runde 2b: Kandidaten aus der Gemini-Recherche
+# Standardwerte und Raster genau wie im Gemini-Bericht vom 08.11.2026 (lab/ERGEBNISSE_V2B.md). Alles auf Tageskerzen
+# (UTC), Entscheidung auf dem Tagesschluss, Ausführung 1 Minute danach – wie bei allen anderen Familien.
+import warnings  # noqa: E402
+
+
+def _days(ctx):
+    b = ctx.bars(1440)
+    t = pd.to_datetime(b.t, unit="ms")
+    return b, t
+
+
+LOWVOL_GRID = [dict(m=m_, d=d_, th=th) for m_, d_, th in
+               itertools.product((14, 30, 60), (0.015, 0.03, 0.045), (-0.20, 0.0, 0.10))]
+LOWVOL_GEMINI = dict(m=30, d=0.03, th=0.0)
+
+
+def run_lowvol(ctx, p, cost, start, end):
+    """Kandidat 1 (Bianchi et al. 2022): Tagesverlierer mit unterdurchschnittlichem Volumen kaufen, 1 Tag halten."""
+    m = ctx.m
+    b, _ = _days(ctx)
+
+    def feats():
+        c = b.c
+        with np.errstate(invalid="ignore", divide="ignore"), warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            R = c / pd.DataFrame(c).shift(1).to_numpy() - 1
+            rbar = np.nanmean(R, axis=1, keepdims=True)
+            dv = c * b.v
+            ldv = np.log(np.where(dv > 0, dv, np.nan))
+        return R, rbar, ldv
+    R, rbar, ldv = ctx.memo("lowvol_feat", feats)
+    base = pd.DataFrame(ldv).shift(1).rolling(p["m"], min_periods=p["m"]).mean().to_numpy()
+    with np.errstate(invalid="ignore"):
+        sig = (R < rbar) & (R <= -p["d"]) & ((ldv - base) < p["th"])
+    prio = on_grid(m, b, np.nan_to_num(-R))
+    return _trades(ctx, on_grid(m, b, sig, bool), np.nan_to_num(prio), _const(m, 0.10), _const(m, np.inf),
+                   _const(m, 0.0), BARS_1D, 0, 0.25, 0.25, 2, cost, start, end, min_frac=0.125, extend=True)
+
+
+PASTLOSER_GRID = [dict(J=J, K=K, L=L) for J, K, L in itertools.product((4, 8, 12, 26), (1, 2, 4), (0.0, 0.10))]
+PASTLOSER_GEMINI = dict(J=8, K=2, L=0.10)
+
+
+def run_pastloser(ctx, p, cost, start, end):
+    """Kandidat 2 (Dobrynskaya 2023): die 2 größten Verlierer über J Wochen kaufen, K Wochen halten (sonntags)."""
+    m = ctx.m
+    b, t = _days(ctx)
+    c = b.c
+    with np.errstate(invalid="ignore", divide="ignore"):
+        RJ = c / pd.DataFrame(c).shift(7 * p["J"]).to_numpy() - 1
+    weeks = ((t - pd.Timestamp("2017-01-02")).days // 7).to_numpy()
+    reb = (t.dayofweek.to_numpy() == 6) & (weeks % p["K"] == 0)
+    with np.errstate(invalid="ignore"):
+        elig = np.isfinite(RJ) & (RJ <= -p["L"]) & reb[:, None]
+    score = np.where(elig, RJ, np.inf)
+    rank = score.argsort(axis=1).argsort(axis=1)
+    sig = elig & (rank < 2)
+    prio = on_grid(m, b, np.where(np.isfinite(RJ), -RJ, 0.0))
+    return _trades(ctx, on_grid(m, b, sig, bool), np.nan_to_num(prio), _const(m, 0.20), _const(m, np.inf),
+                   _const(m, 0.0), 7 * p["K"] * BARS_1D, 0, 0.20, 0.20, 2, cost, start, end, min_frac=0.10, extend=True)
+
+
+TOM_GRID = [dict(pre=a, post=z, mode=md) for a, z, md in itertools.product((1, 2, 3), (2, 3, 4, 5), (1, 2))]
+TOM_GEMINI = dict(pre=1, post=3, mode=2)
+
+
+def run_tom(ctx, p, cost, start, end):
+    """Kandidat 3 (Kumar 2022, Vasileiou 2023): BTC (und ETH) nur rund um den Monatswechsel halten."""
+    m = ctx.m
+    b, t = _days(ctx)
+    on = t.day.to_numpy() == t.days_in_month.to_numpy() - p["pre"]
+    sig = np.zeros(b.c.shape, bool)
+    for j in range(p["mode"]):                          # 0 = BTC, 1 = ETH
+        sig[:, j] = on & np.isfinite(b.c[:, j])
+    return _trades(ctx, on_grid(m, b, sig, bool), np.zeros((m.N, m.K)), _const(m, 0.08), _const(m, np.inf),
+                   _const(m, 0.0), (p["pre"] + p["post"]) * BARS_1D, 0, 0.30, 0.30, 2, cost, start, end, min_frac=0.15)
+
+
+TRB_GRID = [dict(ne=a, nx=z, band=bb) for a, z, bb in itertools.product((50, 100, 150), (25, 50, 100), (0.0, 0.005, 0.01))]
+TRB_GEMINI = dict(ne=50, nx=25, band=0.005)
+
+
+def run_trb(ctx, p, cost, start, end):
+    """Kandidat 4 (Hudson & Urquhart 2021): Tagesschluss über dem n-Tage-Hoch kaufen, unter dem n-Tage-Tief raus (ohne BTC)."""
+    m = ctx.m
+    b, _ = _days(ctx)
+    c = b.c
+    cdf = pd.DataFrame(c).shift(1)
+    res = (1 + p["band"]) * cdf.rolling(p["ne"], min_periods=int(0.8 * p["ne"])).max().to_numpy()
+    sup = (1 - p["band"]) * cdf.rolling(p["nx"], min_periods=int(0.8 * p["nx"])).min().to_numpy()
+    with np.errstate(invalid="ignore", divide="ignore"):
+        sig = c > res
+        ex = c < sup
+        strength = np.nan_to_num(c / res - 1)
+    sig[:, 0] = False                                   # BTC ausgenommen (laut Quelle dort kein Vorteil mehr)
+    return _trades(ctx, on_grid(m, b, sig, bool), np.nan_to_num(on_grid(m, b, strength)), _const(m, 0.15),
+                   _const(m, np.inf), _const(m, 0.0), 10 ** 9, 0, 0.25, 0.25, 2, cost, start, end, min_frac=0.125,
+                   exit_sig=on_grid(m, b, ex, bool))
+
+
+DDVOL_GRID = [dict(W=w, dd=d_, R=r) for w, d_, r in itertools.product((14, 21, 30), (0.04, 0.06, 0.08), (3, 7, 14))]
+DDVOL_GEMINI = dict(W=21, dd=0.06, R=7)
+
+
+def run_ddvol(ctx, p, cost, start, end, module=0.40):
+    """Kandidat 5 (Gemini-Konstruktion): Top-2 nach rollierender Sharpe, Gewicht ~ Sharpe/Volatilität, Modul 40 %,
+    alles verkaufen bei 6 % Modul-Drawdown, 1 Tag Pause."""
+    m = ctx.m
+    d = daily_ctx(ctx)
+    b = d["b"]
+    c = b.c[:, :5]                                      # BTC, ETH, SOL, BNB, XRP
+    with np.errstate(invalid="ignore", divide="ignore"):
+        R = pd.DataFrame(c / pd.DataFrame(c).shift(1).to_numpy() - 1)
+        mu = R.rolling(p["W"], min_periods=p["W"]).mean().to_numpy()
+        sd = R.rolling(p["W"], min_periods=p["W"]).std().to_numpy()
+        S = mu / sd
+        score = S / sd
+    elig = np.isfinite(S) & (S > 0.10)
+    key = np.where(elig, -S, np.inf)
+    rank = key.argsort(axis=1).argsort(axis=1)
+    pick = elig & (rank < 2)
+    w = np.where(pick, score, 0.0)
+    tot = w.sum(axis=1, keepdims=True)
+    w = np.where(tot > 0, w / np.where(tot > 0, tot, 1.0), 0.0)
+    W = np.zeros((len(c), m.K))
+    W[:, :5] = w
+    days = np.flatnonzero(d["ok"])
+    days = days[days % p["R"] == 0]
+    rebal = d["ends"][days]
+    keep = rebal >= 0
+    eq, _, orders, trips = engine.sim_weights_dd(m.CF, m.EP, W[days][keep], rebal[keep].astype(np.int64), float(cost),
+                                                 0.10, float(p["dd"]), BARS_1D, int(start), int(end))
+    r = np.nan_to_num(np.diff(eq) / eq[:-1])
+    acc = np.full(m.N, np.nan)
+    acc[start:end] = np.concatenate([[1.0], np.cumprod(1 + module * r[start:end - 1])])
+    return acc, dict(orders=orders, trips=trips)
+
+
+MONDAY_GRID = [dict(wd=w, h=h, f=f) for w, h, f in itertools.product((6, 1, 3), (1, 2), ("none", "pos", "neg"))]
+MONDAY_GEMINI = dict(wd=6, h=1, f="none")
+
+
+def run_monday(ctx, p, cost, start, end):
+    """Kandidat 6 (Caporale & Plastun 2019): BTC nach dem Schluss eines Wochentags kaufen (Standard: Montag), h Tage halten."""
+    m = ctx.m
+    b, t = _days(ctx)
+    c = b.c[:, 0]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        prev = c / np.concatenate([[np.nan], c[:-1]]) - 1
+    on = (t.dayofweek.to_numpy() == p["wd"]) & np.isfinite(c)
+    if p["f"] == "pos":
+        on &= prev > 0
+    elif p["f"] == "neg":
+        on &= prev < 0
+    sig = np.zeros(b.c.shape, bool)
+    sig[:, 0] = on
+    return _trades(ctx, on_grid(m, b, sig, bool), np.zeros((m.N, m.K)), _const(m, 0.06), _const(m, np.inf),
+                   _const(m, 0.0), p["h"] * BARS_1D, 0, 0.30, 0.30, 1, cost, start, end, min_frac=0.15)
+
+
+ROUND2B = ("LOWVOL", "PASTLOSER", "TOM", "TRB", "DDVOL", "MONDAY")
+GEMINI2_DEFAULTS = {"LOWVOL": LOWVOL_GEMINI, "PASTLOSER": PASTLOSER_GEMINI, "TOM": TOM_GEMINI, "TRB": TRB_GEMINI,
+                    "DDVOL": DDVOL_GEMINI, "MONDAY": MONDAY_GEMINI}
+
+
 # ====================================================================== Register
 FAMILIES = {
     "TREND4H": (TREND_GRID, run_trend),
@@ -398,6 +564,12 @@ FAMILIES = {
     "CORE": (CORE_GRID, run_core),
     "PULLBACK": (PULLBACK_GRID, run_pullback),
     "TRANCHE": (TRANCHE_GRID, run_tranche),
+    "LOWVOL": (LOWVOL_GRID, run_lowvol),
+    "PASTLOSER": (PASTLOSER_GRID, run_pastloser),
+    "TOM": (TOM_GRID, run_tom),
+    "TRB": (TRB_GRID, run_trb),
+    "DDVOL": (DDVOL_GRID, run_ddvol),
+    "MONDAY": (MONDAY_GRID, run_monday),
 }
 BENCHMARKS = {
     "CASH": dict(what="cash"), "BTC_HALTEN": dict(what="btc"), "ALLE_HALTEN": dict(what="ew"),

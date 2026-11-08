@@ -5,6 +5,9 @@ den Skripten in diesem Ordner nachrechnen (ganz unten).
 
 ## Kurz
 
+> **Nachtrag Runde 2b:** Sechs weitere Kandidaten aus einer Literatur-Recherche (Gemini) wurden unter demselben
+> Maßstab geprüft; keiner verbessert den Bot ([ERGEBNISSE_V2B.md](ERGEBNISSE_V2B.md)).
+
 * **Gewinner nach dem Maßstab: die bestehende NewTry-Kombination** (Trend-Ausbruch 4h + Crash-Kauf in einem gemeinsamen
   Depot). Realistisch gerechnet 2020–10/2026: **+80 % pro Jahr, größter Rückgang 26–28 %, gesicherter Netto-Ertrag +51 %**
   (10-%-Quantil). Sie ist der einzige Kandidat, der auch nach Korrektur für 515 getestete Varianten belegt ist
