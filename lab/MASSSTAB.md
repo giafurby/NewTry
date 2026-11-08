@@ -67,3 +67,4 @@ mit genau den Standardwerten und Prüfrastern, die Gemini angegeben hat. Dort, w
   steigt** und der Härtetest des Kandidaten (0,40 % je Seite) positiv bleibt.
 * Kandidat 5 (Drawdown-gesteuerte Volatilitäts-Allokation) wird wie beschrieben als Modul mit 40 % des Kapitals gerechnet
   (Rest Cash). Sein Hauptbeleg (arXiv:2511.13251) war nicht auffindbar; das Ergebnis wird entsprechend eingeordnet.
+  *Korrektur nach der Auswertung: Die Arbeit existiert; sie untersucht chinesische Aktien, keine Kryptowährungen.*

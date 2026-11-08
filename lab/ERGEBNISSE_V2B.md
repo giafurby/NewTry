@@ -28,7 +28,7 @@ Long-Only-Binance-Spot-Bot …“, 42 Seiten, 6 Kandidaten, Teile A–E) und die
 | Dobrynskaya 2023, *J. Alternative Investments* 26(1) (Kandidat 2) | existiert; Kernaussage stimmt |
 | Kumar 2022, *Managerial Finance* 48(5); Vasileiou 2023, *IJBAAF* 13(3) (Kandidat 3) | existieren; Kumar nennt +21,77 %/+47,10 % p. a. gegenüber Halten (BTC/LTC), was Gemini als „nicht angegeben“ führte |
 | Hudson & Urquhart 2021, *Annals of OR* 297 (Kandidat 4) | existiert; ≈ 15.000 Regeln mit Data-Snooping-Korrektur; die Out-of-Sample-Aussage konnte ich nicht prüfen |
-| arXiv:2511.13251 (Hauptbeleg Kandidat 5) | **nicht auffindbar** |
+| arXiv:2511.13251 (Hauptbeleg Kandidat 5) | existiert (Nguyen, 11/2025); die 6-%-Drawdown-Regel mit 1 Tag Pause steht dort wörtlich. **Untersucht werden aber chinesische Aktien 2023–2025, keine Kryptowährungen** (Geminis Karte sprach von Kryptowährungen). Korrektur: Meine erste Suche über die Nummer hatte sie nicht gefunden. |
 | arXiv:2608.10375 „VolRouter“ (Kandidat 5) | existiert, behandelt aber Volatilitätssteuerung als Routing-Problem; Kandidat 5 ist eine Konstruktion von Gemini |
 | Caporale & Plastun 2019 (Kandidat 6) | nicht einzeln geprüft (bekannte Studie); Gemini nennt selbst die Widerlegungen |
 
@@ -76,7 +76,8 @@ Kombi; beides trifft nicht zu.
    +790 %, SOL 08/2021 +386 %). Ohne ZEC: +57 % statt +104 %/Jahr. Er verdient im Wesentlichen dasselbe wie die bereits
    laufende 4h-Trendregel, nur mit größeren Rückgängen.
 5. **Drawdown-gesteuerte Volatilitäts-Allokation:** Der 6-%-Schalter löste 201-mal aus (Hin und Her) und kostet mehr, als
-   er schützt. Hauptbeleg nicht auffindbar.
+   er schützt. Die Regel stammt aus einer Studie zu chinesischen Aktien; auf Kryptowährungen mit ihren viel größeren
+   Tagesschwankungen wird ein 6-%-Schalter ständig ausgelöst.
 6. **Montags-Effekt:** wie die Replikationen: im Mittel unter den Kosten.
 
 ## 4. Teil C und D
@@ -95,7 +96,7 @@ und liegt **40 % der Zeit** fast ganz in USDC. Rund 100 von 150 USDC liegen also
 | | |
 |---|---|
 | Möglichkeit | Binance Simple Earn „USDC Flexible“ (laut Gemini 9,17 % APR inkl. Bonus-Stufe am 08.11.2026 – **nicht geprüft**; der Satz ändert sich täglich, Bonus-Stufen gelten meist nur für kleine Beträge) |
-| Ertrag | bei 100 USDC und 4–9 % etwa **4–9 USDC pro Jahr** |
+| Ertrag | bei 100 USDC etwa **3,5–9 USDC pro Jahr** (laut Gemini ohne Aktionsbonus 3,61 % für „USDC RWA Flexible“, 3,37 % für feste Laufzeit – nicht geprüft) |
 | Risiken | Rücknahme-Verzögerung „bei extremer Marktvolatilität“ – genau dann, wenn der Crash-Kauf Geld braucht; Gegenparteirisiko (Binance verleiht das Geld weiter); tägliche Rücknahmegrenzen |
 | Was der Bot dafür bräuchte | Earn-Guthaben ins Kapital einrechnen (sonst sieht er eine Auszahlung und kauft zu klein), vor jedem Kauf zurückholen, eine feste Barreserve für Crash-Käufe halten |
 
