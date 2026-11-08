@@ -24,7 +24,7 @@ R_STOP, R_TARGET, R_TIME, R_TRAIL, R_PART, R_SIGNAL, R_END = 1, 2, 3, 4, 5, 6, 7
 
 @njit(cache=True)
 def sim_trades(O, H, L, CF, EP, sig, prio, stopf, tgtf, trailf, hold, part_frac, part_tgt, size_mode, size_a, size_cap,
-               kmax, cost, cooldown, start, end, min_frac, exit_sig):
+               kmax, cost, cooldown, start, end, min_frac, exit_sig, extend):
     """
     sig[i, j]     Einstiegssignal auf dem Schluss von Kerze i
     prio[i, j]    Reihenfolge bei mehreren Signalen in derselben Kerze (größer zuerst)
@@ -36,6 +36,8 @@ def sim_trades(O, H, L, CF, EP, sig, prio, stopf, tgtf, trailf, hold, part_frac,
     size_cap      höchstens dieser Anteil des Kapitals je Position; kmax Positionen gleichzeitig
     cooldown      Kerzen Sperre für den Coin nach einem Stop
     exit_sig[i,j] zusätzlicher Ausstieg auf dem Schluss von Kerze i (z. B. Trendwechsel)
+    extend        True: Besteht das Einstiegssignal am Ende der Haltedauer erneut, läuft die Position um `hold` Kerzen
+                  weiter (kein Verkauf und Neukauf, keine Kosten)
     Rückgabe: Kapitalkurve (N), Trades (n, 8): Einstiegskerze, Ausstiegskerze, Coin, Einstieg, Ausstieg, Rendite netto,
               Grund, Kapitalanteil
     """
@@ -96,6 +98,8 @@ def sim_trades(O, H, L, CF, EP, sig, prio, stopf, tgtf, trailf, hold, part_frac,
                         ns = peak[j] * (1.0 - trail[j])
                         if ns > stop[j]:
                             stop[j] = ns
+            if px != px and i >= deadline[j] and extend and sig[i, j]:
+                deadline[j] = i + hold
             if px != px and i >= deadline[j] and CF[i, j] == CF[i, j]:
                 px = CF[i, j]
                 reason = R_TIME
@@ -352,7 +356,7 @@ def sim_joint(O, H, L, CF, EP, sigA, stopA, tgtA, holdA, riskA, capA, kA, minA,
     """
     Gemeinsames Depot wie im NewTry-Bot: Regel A (Trend, Größe = Risiko / Stop, höchstens capA) und Regel B (Crash-Kauf,
     feste Größe sizeB) teilen sich das freie Geld, je Coin höchstens EINE Position, A wird vor B geprüft.
-    Sperre nach Stop nur für B. Rückgabe: Kapitalkurve, Trades (…, Spalte 7 = Art 0/1).
+    Sperre nach Stop nur für B. Rückgabe: Kapitalkurve, Trades (…, Spalte 7 = Art 0/1, Spalte 8 = Anteil des Kapitals).
     """
     N, K = O.shape
     eq = np.full(N, np.nan)
@@ -365,9 +369,10 @@ def sim_joint(O, H, L, CF, EP, sigA, stopA, tgtA, holdA, riskA, capA, kA, minA,
     ebar = np.zeros(K, np.int64)
     deadline = np.zeros(K, np.int64)
     cost_in = np.zeros(K)
+    wfrac = np.zeros(K)
     blocked = np.zeros(K, np.int64)
     cap = 400_000
-    tr = np.zeros((cap, 8))
+    tr = np.zeros((cap, 9))
     nt = 0
     for i in range(start, end):
         for j in range(K):
@@ -399,6 +404,7 @@ def sim_joint(O, H, L, CF, EP, sigA, stopA, tgtA, holdA, riskA, capA, kA, minA,
                     tr[nt, 5] = proceeds / cost_in[j] - 1.0
                     tr[nt, 6] = reason
                     tr[nt, 7] = kind[j]
+                    tr[nt, 8] = wfrac[j]
                     nt += 1
                 if kind[j] == 1 and reason == R_STOP and coolB > 0:
                     blocked[j] = i + coolB
@@ -454,8 +460,102 @@ def sim_joint(O, H, L, CF, EP, sigA, stopA, tgtA, holdA, riskA, capA, kA, minA,
                 ebar[j] = i + 1
                 deadline[j] = i + hold
                 cost_in[j] = budget
+                wfrac[j] = budget / val
                 if rule == 0:
                     nA += 1
                 else:
                     nB += 1
     return eq, tr[:nt]
+
+
+@njit(cache=True)
+def sim_weights_dd(CF, EP, W, rebal, cost, band, dd_max, cool_bars, start, end):
+    """
+    Wie sim_weights, dazu ein Drawdown-Schalter auf das Modul-Kapital: Fällt es in irgendeiner Kerze mehr als dd_max unter
+    seinen Höchststand, wird alles zum Schluss dieser Kerze verkauft und `cool_bars` Kerzen nicht gehandelt. Danach gilt der
+    aktuelle Wert als neuer Höchststand; gekauft wird ab dem nächsten regulären Umschichtungstermin.
+    Rückgabe: Kapitalkurve, Umschlag, Anzahl Orders, Anzahl Auslösungen.
+    """
+    N, K = CF.shape
+    eq = np.full(N, np.nan)
+    cash = 1.0
+    units = np.zeros(K)
+    r = 0
+    R = len(rebal)
+    while r < R and rebal[r] < start:
+        r += 1
+    turnover = 0.0
+    orders = 0
+    trips = 0
+    peak = 1.0
+    cool_until = -1
+    for i in range(start, end):
+        val = cash
+        for j in range(K):
+            if units[j] > 0.0:
+                c = CF[i, j]
+                if c == c:
+                    val += units[j] * c
+        if i == cool_until:
+            peak = val
+        if val > peak:
+            peak = val
+        if i >= cool_until and val < peak * (1.0 - dd_max):
+            for j in range(K):
+                if units[j] > 0.0:
+                    c = CF[i, j]
+                    cash += units[j] * c * (1.0 - cost)
+                    turnover += units[j] * c / val
+                    units[j] = 0.0
+                    orders += 1
+            val = cash
+            trips += 1
+            cool_until = i + cool_bars
+        eq[i] = val
+        while r < R and rebal[r] < i:
+            r += 1
+        if r < R and rebal[r] == i and i + 1 < N:
+            if i >= cool_until:
+                px = np.empty(K)
+                pv = cash
+                for j in range(K):
+                    p = EP[i + 1, j]
+                    if p != p:
+                        p = CF[i, j]
+                    px[j] = p
+                    if units[j] > 0.0 and p == p:
+                        pv += units[j] * p
+                for j in range(K):
+                    if units[j] <= 0.0 or px[j] != px[j]:
+                        continue
+                    cur = units[j] * px[j] / pv
+                    tw = W[r, j]
+                    if tw != tw:
+                        tw = 0.0
+                    if cur - tw > band or (tw <= 0.0 and cur > 0.0):
+                        sell = (cur - tw) * pv
+                        if tw <= 0.0:
+                            sell = units[j] * px[j]
+                        units[j] -= sell / px[j]
+                        if units[j] < 1e-15:
+                            units[j] = 0.0
+                        cash += sell * (1.0 - cost)
+                        turnover += sell / pv
+                        orders += 1
+                for j in range(K):
+                    if px[j] != px[j]:
+                        continue
+                    cur = units[j] * px[j] / pv
+                    tw = W[r, j]
+                    if tw != tw or tw <= 0.0:
+                        continue
+                    if tw - cur > band or (cur <= 0.0 and tw > 0.0):
+                        buy = min((tw - cur) * pv, cash)
+                        if buy <= pv * 0.002:
+                            continue
+                        cash -= buy
+                        units[j] += buy * (1.0 - cost) / px[j]
+                        turnover += buy / pv
+                        orders += 1
+            r += 1
+    return eq, turnover, orders, trips

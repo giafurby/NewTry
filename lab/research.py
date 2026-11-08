@@ -196,7 +196,9 @@ def main():
         "GEMINI_A_PULLBACK": [("PULLBACK", F.PULLBACK_GEMINI, 1.0)],
         "GEMINI_B_TRANCHE": [("TRANCHE", F.TRANCHE_GEMINI, 1.0)],
         "GEMINI_HYBRID": [("PULLBACK", F.PULLBACK_GEMINI, 0.5), ("TRANCHE", F.TRANCHE_GEMINI, 0.5)],
+        **{f"GEMINI2_{fam}": [(fam, p, 1.0)] for fam, p in F.GEMINI2_DEFAULTS.items()},
     }
+    segs = {}
     for name, parts in fixed.items():
         hs, hs_s, ws, ntr = [], [], [], 0
         for fam, p, w in parts:
@@ -219,10 +221,33 @@ def main():
                                      full=dict(cagr=res_full["cagr"], maxdd=res_full["maxdd"], yearly=res_full["yearly"]),
                                      trades_full=ntr)
         np.save(out / f"fixed_{name}.npy", seg)
+        segs[name] = seg
         print(f"{name:<18} 2020–26 {res['cagr']:+7.1%}/Jahr, DD {res['maxdd']:4.0%}, gesichert {res['secured']:+7.1%}, "
               f"Stress {res_s['cagr']:+7.1%} | 2018–26 {res_full['cagr']:+7.1%}, DD {res_full['maxdd']:4.0%} | "
               f"DSR {res['dsr']:.2f} (naiv {res['dsr_naive_all_families']:.2f})", flush=True)
 
+    # ---------------------------------------------------------------- Runde 2b: Ergänzungs-Prüfung (MASSSTAB.md, Nachtrag)
+    kombi = segs["NEWTRY_KOMBI"]
+    report["blend_2b"] = {}
+    base = report["fixed"]["NEWTRY_KOMBI"]["oos"]
+    kd = pd.Series(kombi, index=pd.to_datetime(t_oos, unit="ms"))
+    kd = kd.groupby(kd.index.floor("D")).last().pct_change()
+    print(f"\nErgänzungs-Prüfung: 80 % Kombi + 20 % Kandidat (Kombi allein: gesichert {base['secured']:+.1%}, "
+          f"Rückgang 90 % {base['boot']['dd_p90']:.0%})")
+    for fam in F.ROUND2B:
+        cand = np.load(out / f"oos_{fam}.npy")
+        mix = comb([kombi, cand], [0.8, 0.2])
+        ev = lab.evaluate(mix, t_oos, ew_daily, n_trials=n_all, sr_var=sr_var_pooled)
+        cd = pd.Series(cand, index=pd.to_datetime(t_oos, unit="ms"))
+        cd = cd.groupby(cd.index.floor("D")).last().pct_change()
+        corr = float(kd.corr(cd))
+        stress = report["families"][fam]["oos_stress"]["cagr"]
+        ok = ev["secured"] > base["secured"] and ev["boot"]["dd_p90"] <= base["boot"]["dd_p90"] + 1e-9 and stress > 0
+        report["blend_2b"][fam] = dict(cagr=ev["cagr"], maxdd=ev["maxdd"], secured=ev["secured"],
+                                       dd_p90=ev["boot"]["dd_p90"], corr_kombi=corr, stress_candidate=stress, passes=ok)
+        print(f"  {fam:<10} Mischung {ev['cagr']:+7.1%}/Jahr, DD {ev['maxdd']:4.0%}, gesichert {ev['secured']:+7.1%}, "
+              f"DD90 {ev['boot']['dd_p90']:4.0%} | Korrelation zur Kombi {corr:+.2f} | Härtetest Kandidat {stress:+.1%} | "
+              f"{'BESTANDEN' if ok else 'nicht bestanden'}", flush=True)
     report["meta"]["trials_total"] = n_all
     report["meta"]["sr_var_all"] = sr_var_all
     report["meta"]["sr_var_pooled"] = sr_var_pooled

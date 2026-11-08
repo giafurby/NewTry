@@ -20,7 +20,7 @@ def run(O, H, L, C, sig, stopf=0.1, tgtf=np.inf, hold=5, cost=0.0, size=1.0, EP=
     EP = O if EP is None else EP
     z = np.zeros((n, k))
     return engine.sim_trades(O, H, L, C, EP, sig, z, np.full((n, k), stopf), np.full((n, k), tgtf), z, hold, 0.0, 0.0,
-                             0, size, size, 3, cost, 0, 0, n, 0.0, np.zeros((n, k), bool))
+                             0, size, size, 3, cost, 0, 0, n, 0.0, np.zeros((n, k), bool), False)
 
 
 def test_time_exit_after_hold_bars_and_costs_on_both_sides():
@@ -71,8 +71,32 @@ def test_joint_depot_without_crash_signals_equals_single_strategy():
     tgtf = np.full((n, k), 0.06)
     z = np.zeros((n, k))
     a, ta = engine.sim_trades(O, H, L, C, O, sig, z, stopf, tgtf, z, 30, 0.0, 0.0, 1, 0.01, 0.33, 3, 0.002, 0, 0, n,
-                              0.02, np.zeros((n, k), bool))
+                              0.02, np.zeros((n, k), bool), False)
     b, tb = engine.sim_joint(O, H, L, C, O, sig, stopf, tgtf, 30, 0.01, 0.33, 3, 0.02, np.zeros((n, k), bool), 0.15, 16,
                              0.2, 3, 96, 0.002, 0, n)
     assert len(ta) == len(tb) > 5
     np.testing.assert_allclose(a, b)
+
+
+def test_position_is_extended_while_entry_signal_persists():
+    O, H, L, C = flat()
+    sig = np.zeros((40, 1), bool)
+    sig[10, 0] = sig[15, 0] = True                          # Signal am Ende der ersten Haltedauer erneut
+    n, k = O.shape
+    z = np.zeros((n, k))
+    eq, tr = engine.sim_trades(O, H, L, C, O, sig, z, np.full((n, k), 0.1), np.full((n, k), np.inf), z, 5, 0.0, 0.0,
+                               0, 1.0, 1.0, 3, 0.001, 0, 0, n, 0.0, np.zeros((n, k), bool), True)
+    assert len(tr) == 1 and tr[0][1] == 20                  # ein Trade, verkauft erst am Ende der Verlängerung
+    assert eq[-1] == pytest.approx(0.999 * 0.999)           # nur einmal Kosten für Kauf und Verkauf
+
+
+def test_drawdown_switch_sells_everything_and_waits():
+    n = 60
+    CF = np.full((n, 1), 100.0)
+    CF[20:, 0] = 90.0                                       # −10 % ab Kerze 20
+    W = np.ones((3, 1))
+    rebal = np.array([5, 25, 45], dtype=np.int64)
+    eq, turnover, orders, trips = engine.sim_weights_dd(CF, CF, W, rebal, 0.0, 0.0, 0.06, 10, 0, n)
+    assert trips == 1
+    assert eq[20] == pytest.approx(0.9) and eq[29] == pytest.approx(0.9)      # ab Kerze 20 in Cash, Pause bis 30
+    assert orders == 3                                      # Kauf bei 5, Notverkauf bei 20, Kauf bei 45 (25 in der Pause)

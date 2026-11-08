@@ -53,3 +53,17 @@ und muss den besten Einzelkandidaten beim gesicherten Netto-Ertrag schlagen, son
 * **Orderbuch:** Historische Spreads im Crash sind unbekannt. Die 1-Minuten-Verzögerung und der Härtetest fangen einen
   Teil ab, nicht alles.
 * Ein Rückblick bleibt ein Rückblick. Die Zahlen sind Obergrenzen, keine Versprechen.
+
+## Nachtrag Runde 2b (08.11.2026, vor der Auswertung festgelegt): Kandidaten aus der Gemini-Recherche
+
+Die sechs Kandidaten aus dem Rechercheauftrag an Gemini laufen unter **denselben Bedingungen** wie oben (Abschnitte 1–3),
+mit genau den Standardwerten und Prüfrastern, die Gemini angegeben hat. Dort, wo Gemini „eigene Ergänzung“ markiert hat
+(Notstop, Positionsgröße, Mindestverlust), gilt die Ergänzung unverändert. Hinzu kommen:
+
+* **Mehrfachtest:** Die neuen Varianten zählen zu den bisherigen 515 dazu; die Hürde steigt entsprechend.
+* **Ergänzungs-Prüfung:** Jeder Kandidat (Walk-Forward) wird zusätzlich als fester Anteil neben die NewTry-Kombination
+  gestellt: **80 % Kombi + 20 % Kandidat** (stündlich auf Zielgewicht). Ein Kandidat kommt nur dann für den Bot in Frage,
+  wenn diese Mischung den gesicherten Netto-Ertrag der Kombi allein **übertrifft**, der Rückgang (90-%-Quantil) **nicht
+  steigt** und der Härtetest des Kandidaten (0,40 % je Seite) positiv bleibt.
+* Kandidat 5 (Drawdown-gesteuerte Volatilitäts-Allokation) wird wie beschrieben als Modul mit 40 % des Kapitals gerechnet
+  (Rest Cash). Sein Hauptbeleg (arXiv:2511.13251) war nicht auffindbar; das Ergebnis wird entsprechend eingeordnet.
