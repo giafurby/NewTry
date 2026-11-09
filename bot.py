@@ -613,10 +613,11 @@ class Bot:
         remaining = pos["amount"] - min(sold, pos["amount"])
         partial = market is not None and remaining * fill.price >= market.min_cost
         cost_part = pos["cost"] * (sold / pos["amount"]) if partial and pos["amount"] > 0 else pos["cost"]
-        proceeds = fill.cost - fill.fee_quote
+        proceeds = fill.cost - fill.fee_quote - fill.fee_other
         pnl = proceeds - cost_part
         st["realized_pnl"] = float(st.get("realized_pnl") or 0.0) + pnl
         st["fees_paid"] = float(st.get("fees_paid") or 0.0) + fill.fee_value
+        st["fees_external"] = float(st.get("fees_external") or 0.0) + fill.fee_other
         if partial:
             pos["amount"] = remaining
             pos["cost"] -= cost_part
@@ -830,14 +831,20 @@ class Bot:
         lines = [f"🔎 4h-Prüfung {self.when(candle_close)}: {len(checks)} Coins geprüft."]
         for check in signals:
             lines.append(f"• Kaufsignal {coin(check.symbol)}: {self.scan_notes.get(check.symbol, '')}")
+        held = set(self.st["positions"])
         if not signals:
             lines.append("Kein Kaufsignal.")
-            near = sorted((c for c in checks if c.above_ema and c.gap_pct > 0), key=lambda c: c.gap_pct)[:3]
+            # Ein Coin im Bestand zählt nicht: Nach dem Kauf liegt das 100-Kerzen-Hoch durch die Ausbruchskerze selbst
+            # weit über dem Kurs, die Regel würde ihn ohnehin nicht noch einmal kaufen.
+            near = sorted((c for c in checks if c.above_ema and c.gap_pct > 0 and c.symbol not in held),
+                          key=lambda c: c.gap_pct)[:3]
             if near:
                 lines.append("Am nächsten dran: " + ", ".join(f"{coin(c.symbol)} (noch +{de(c.gap_pct, 1)} %)"
                                                               for c in near))
             below = sum(1 for c in checks if c.has_data and not c.above_ema)
             lines.append(f"{below} von {len(checks)} Coins unter der EMA 200 (Abwärtstrend, dort kauft die Regel nie).")
+        if held:
+            lines.append(f"Im Bestand: {', '.join(coin(s) for s in sorted(held))} (Stand: /status)")
         if failed:
             lines.append(f"Nicht abrufbar: {', '.join(coin(s) for s in failed)}")
         lines.append(f"Nächste Prüfung: {self.when(candle_close + strategy.TIMEFRAME_MS)}")
@@ -913,7 +920,7 @@ class Bot:
             if 0 < received <= fill.amount * 1.0001:
                 net = received                   # das Konto ist die Wahrheit (Gebühr schon abgezogen)
         entry = fill.price
-        cost = fill.cost + fill.fee_quote
+        cost = fill.cost + fill.fee_quote + fill.fee_other       # Gebühr in BNB zählt zu den Kosten der Position
         stop_fraction = float(info["stop_fraction"])
         kind = info.get("kind") or "trend"
         candle = info.get("candle_ts")
@@ -941,6 +948,7 @@ class Bot:
         elif candle:
             st["entered"][symbol] = int(candle)
         st["fees_paid"] = float(st.get("fees_paid") or 0.0) + fill.fee_value
+        st["fees_external"] = float(st.get("fees_external") or 0.0) + fill.fee_other
         st["pending"] = None
         self.prices[symbol] = entry
         self.recompute_equity()
@@ -1046,7 +1054,8 @@ class Bot:
     def summary_lines(self) -> list[str]:
         st, s = self.st, self.s
         start = float(st["start_equity"] or 0.0)
-        profit = self.equity - start - float(st.get("net_deposits") or 0.0)
+        # Gebühren, die Binance aus dem BNB-Guthaben abzieht, stehen nicht im Kapital (USDC + Positionen): hier abziehen
+        profit = self.equity - start - float(st.get("net_deposits") or 0.0) - float(st.get("fees_external") or 0.0)
         peak = float(st["peak_equity"] or self.equity)
         day_start = float(st["day_start_equity"] or self.equity)
         state = "läuft"
@@ -1084,8 +1093,10 @@ class Bot:
                 lines.append(f"   {guard}")
         trades = [t for t in st["closed"] if not t.get("selftest")]
         wins = sum(1 for t in trades if t["pnl"] > 0)
+        external = float(st.get("fees_external") or 0.0)
         lines.append(f"Abgeschlossen: {len(trades)} Trades ({wins} Gewinner) · {signed(sum(t['pnl'] for t in trades))} "
-                     f"{self.q} · Gebühren bisher {de(float(st.get('fees_paid') or 0.0))} {self.q}")
+                     f"{self.q} · Gebühren bisher {de(float(st.get('fees_paid') or 0.0))} {self.q}"
+                     + (f" (davon {de(external)} {self.q} aus dem BNB-Guthaben)" if external > 0 else ""))
         for kind, label in (("trend", "Trend"), ("dip", "Crash-Kauf")):
             part = [t for t in trades if t.get("kind", "trend") == kind]
             if part:
@@ -1164,8 +1175,11 @@ class Bot:
         thin = [c for c in checks if not c.has_data]
         lines = ["📈 Marktlage (letzte geschlossene 4h-Kerze)",
                  f"Über der EMA 200 (Aufwärtstrend): {len(above)} von {len(checks)} Coins"]
+        held = set(self.st["positions"])
         for check in above[:12]:
-            if check.signal:
+            if check.symbol in held:
+                lines.append(f"• {coin(check.symbol)}: im Bestand (siehe /status)")
+            elif check.signal:
                 lines.append(f"• {coin(check.symbol)}: KAUFSIGNAL auf der letzten Kerze")
             elif check.gap_pct <= 0:
                 lines.append(f"• {coin(check.symbol)}: über dem Hoch, aber {check.reason}")

@@ -35,6 +35,7 @@ DEFAULTS: dict[str, Any] = {
     "net_deposits": 0.0,        # Ein- minus Auszahlungen seit dem Start (zählen nicht als Gewinn)
     "realized_pnl": 0.0,
     "fees_paid": 0.0,
+    "fees_external": 0.0,       # davon in einer dritten Währung bezahlt (BNB-Rabatt): zählt nicht in „Kapital“, aber als Kosten
     "selftest_done": False,
     "last_report_day": None,
     "slippage": {},             # Regel -> Kauf-Abweichung in % vom Signal-Schluss (die letzten 50; guards.py)
