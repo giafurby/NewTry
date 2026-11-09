@@ -19,6 +19,13 @@ import ccxt
 
 log = logging.getLogger("newtry.exchange")
 
+BNB_DISCOUNT_RATE = 0.00075      # Gebühr mit BNB-Rabatt (0,075 %): Ersatzwert, wenn der BNB-Kurs nicht abrufbar ist
+
+
+def _decimal_text(value: float, digits: int = 8) -> str:
+    """Zahl mit deutschem Komma, ohne Exponent und ohne überflüssige Nullen (statt 2.797e-05)."""
+    return f"{value:.{digits}f}".rstrip("0").rstrip(".").replace(".", ",") or "0"
+
 
 class ExchangeProblem(Exception):
     """Vorübergehendes Problem (Netz, Börse überlastet). Später erneut versuchen."""
@@ -56,7 +63,8 @@ class Fill:
     price: float         # Durchschnittskurs
     fee_base: float      # Gebühr, die in der Basiswährung abgezogen wurde (Binance: beim Kauf)
     fee_quote: float     # Gebühr, die in der Quote-Währung abgezogen wurde (Binance: beim Verkauf)
-    fee_note: str = ""   # z. B. "0,0001 BNB" oder "Gebühr geschätzt"
+    fee_note: str = ""   # z. B. "0,0001 BNB ≈ 0,02 USDC" oder "Gebühr geschätzt"
+    fee_other: float = 0.0   # Wert (in der Quote-Währung) von Gebühren in einer dritten Währung, z. B. BNB-Rabatt
 
     @property
     def net_amount(self) -> float:
@@ -64,7 +72,7 @@ class Fill:
 
     @property
     def fee_value(self) -> float:
-        return self.fee_quote + self.fee_base * self.price
+        return self.fee_quote + self.fee_base * self.price + self.fee_other
 
 
 class Balances:
@@ -346,7 +354,7 @@ class Broker:
             fees = [order["fee"]]
         if not fees:
             fees = [t["fee"] for t in (order.get("trades") or []) if t.get("fee")]
-        fee_base = fee_quote = 0.0
+        fee_base = fee_quote = fee_other = 0.0
         notes: list[str] = []
         known = False
         for fee in fees:
@@ -359,8 +367,11 @@ class Broker:
                 fee_base += amount
             elif currency == quote:
                 fee_quote += amount
-            elif amount:
-                notes.append(f"{amount:g} {currency}")
+            elif amount and currency:
+                value, estimated = self._fee_in_quote(str(currency), amount, cost)
+                fee_other += value
+                notes.append(f"{_decimal_text(amount)} {currency} ≈ {_decimal_text(value, 4)} {quote}"
+                             + (" (geschätzt)" if estimated else ""))
         if not known and filled > 0:
             # Keine Angabe: vorsichtig 0,1 % annehmen (Binance zieht sie beim Kauf vom Coin ab, beim Verkauf von USDC)
             if side == "buy":
@@ -369,7 +380,22 @@ class Broker:
                 fee_quote = cost * 0.001
             notes.append("Gebühr geschätzt")
         return Fill(order_id=str(order.get("id") or ""), client_id=client_id, side=side, amount=filled, cost=cost,
-                    price=average, fee_base=fee_base, fee_quote=fee_quote, fee_note=", ".join(notes))
+                    price=average, fee_base=fee_base, fee_quote=fee_quote, fee_note=", ".join(notes),
+                    fee_other=fee_other)
+
+    def _fee_in_quote(self, currency: str, amount: float, order_cost: float) -> tuple[float, bool]:
+        """Wert einer Gebühr in dritter Währung (meist BNB) in der Quote-Währung. (Wert, geschätzt?)
+        Ein Kursabruf je Order, ohne Wiederholung: Die Buchung darf an dieser Zahl nie hängen bleiben."""
+        symbol = f"{currency}/{self.quote}"
+        try:
+            tickers = self.client.fetch_tickers([symbol])
+            ticker = (tickers or {}).get(symbol) or {}
+            price = ticker.get("last") or ticker.get("close") or ticker.get("bid")
+            if price:
+                return amount * float(price), False
+        except Exception as exc:  # Kurs nicht abrufbar -> Binance-Rabattsatz annehmen
+            log.info("Kurs für die Gebührenwährung %s nicht abrufbar: %s", symbol, exc)
+        return order_cost * BNB_DISCOUNT_RATE, True
 
     def api_permissions(self) -> Optional[dict[str, Any]]:
         """Rechte des API-Schlüssels (nur echtes Binance). None, wenn nicht abfragbar."""
