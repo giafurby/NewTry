@@ -27,7 +27,8 @@ def test_settings_defaults_and_parsing(tmp_path):
     assert s.dip_enabled and s.dip_drop_pct == 9 and s.dip_position_pct == 20 and s.dip_max_positions == 3
     assert s.dip_stop_pct == 15 and s.dip_hold_hours == 4 and s.dip_cooldown_hours == 24
     assert s.dip_coins == ("BTC", "ETH", "SOL", "BNB", "XRP", "TRX", "DOGE", "ZEC", "ADA", "BCH")
-    assert s.daily_loss_limit_pct == 0 and s.max_drawdown_pct == 40
+    assert s.daily_loss_limit_pct == 0 and s.max_drawdown_pct == 30
+    assert not s.earn_enabled and s.earn_reserve == 60 and s.earn_redeem_wait_s == 20 and s.halt_wait_hours == 24
 
 
 def test_settings_reject_live_without_keys_and_bad_numbers(tmp_path):

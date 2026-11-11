@@ -41,6 +41,12 @@ DEFAULTS: dict[str, Any] = {
     "slippage": {},             # Regel -> Kauf-Abweichung in % vom Signal-Schluss (die letzten 50; guards.py)
     "dip_suspended": "",        # Grund, warum der Crash-Kauf ausgesetzt ist (Ausführungswächter); leer = aktiv
     "forward_warned": {},       # Regel -> Vorwärtstest-Warnung schon gesendet
+    "earn": {"amount": 0.0, "product": "", "apr": None, "rewards": 0.0, "rewards_at_start": None, "last_action": ""},
+    "earn_rewards_seen": 0.0,   # Zinsen, die schon aus der Einzahlungserkennung herausgerechnet sind
+    "halted_at": None,          # Zeit (ms) des letzten Notstopps (Wartezeit vor /weiter)
+    "month": None,              # Monat des letzten Monatsberichts ("2026-11")
+    "month_start": None,        # Kapital, Einzahlungen, Gebühren, Zinsen zu Monatsbeginn (für den Monatsbericht)
+    "decisions": [],            # die letzten Entscheidungen (für /warum): {"at", "text"}
 }
 
 
