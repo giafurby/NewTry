@@ -75,6 +75,14 @@ class Fill:
         return self.fee_quote + self.fee_base * self.price + self.fee_other
 
 
+@dataclass(frozen=True)
+class EarnPosition:
+    amount: float                 # angelegtes Guthaben in der Quote-Währung
+    apr: Optional[float]          # zuletzt gemeldeter Jahreszins als Anteil (0.04 = 4 %), None = unbekannt
+    product_id: str
+    rewards_total: float          # bisher gutgeschriebene Zinsen laut Binance
+
+
 class Balances:
     def __init__(self, free: dict[str, float], total: dict[str, float]):
         self._free = free
@@ -397,6 +405,67 @@ class Broker:
             log.info("Kurs für die Gebührenwährung %s nicht abrufbar: %s", symbol, exc)
         return order_cost * BNB_DISCOUNT_RATE, True
 
+    # ------------------------------------------------------------------ Zinsen auf ungenutztes Guthaben (Simple Earn)
+
+    def earn_available(self) -> bool:
+        return all(hasattr(self.client, name) for name in ("sapi_get_simple_earn_flexible_position",
+                                                            "sapi_post_simple_earn_flexible_subscribe",
+                                                            "sapi_post_simple_earn_flexible_redeem"))
+
+    def earn_position(self) -> EarnPosition:
+        """Angelegtes Guthaben in Simple Earn Flexible (Quote-Währung). Fehler -> ExchangeProblem."""
+        if not self.earn_available():
+            return EarnPosition(0.0, None, "", 0.0)
+        raw = self._call("Earn-Guthaben", self.client.sapi_get_simple_earn_flexible_position,
+                         {"asset": self.quote, "size": 100})
+        rows = raw.get("rows") if isinstance(raw, dict) else raw
+        amount, product, apr, rewards = 0.0, "", None, 0.0
+        for row in rows or []:
+            if str(row.get("asset") or "").upper() != self.quote:
+                continue
+            amount += float(row.get("totalAmount") or 0.0)
+            rewards += float(row.get("cumulativeTotalRewards") or 0.0)
+            product = product or str(row.get("productId") or "")
+            rate = row.get("latestAnnualPercentageRate")
+            if rate is not None and apr is None:
+                apr = float(rate)
+        return EarnPosition(amount, apr, product, rewards)
+
+    def earn_product_id(self) -> str:
+        """Produktkennung des Flexible-Produkts der Quote-Währung (z. B. 'USDC001')."""
+        raw = self._call("Earn-Produkte", self.client.sapi_get_simple_earn_flexible_list, {"asset": self.quote})
+        rows = raw.get("rows") if isinstance(raw, dict) else raw
+        for row in rows or []:
+            if str(row.get("asset") or "").upper() == self.quote and row.get("productId"):
+                return str(row["productId"])
+        raise ExchangeProblem(f"Kein Simple-Earn-Produkt für {self.quote} gefunden.")
+
+    def earn_subscribe(self, product_id: str, amount: float) -> bool:
+        """Guthaben anlegen. Rückgabe: angenommen? Kein Netz-Wiederholen (eine Anlage darf nie doppelt laufen)."""
+        try:
+            result = self.client.sapi_post_simple_earn_flexible_subscribe(
+                {"productId": product_id, "amount": f"{amount:.8f}".rstrip("0").rstrip(".")})
+        except ccxt.AuthenticationError as exc:
+            raise AuthProblem(f"Earn anlegen: {exc}") from exc
+        except Exception as exc:
+            raise ExchangeProblem(f"Earn anlegen: {type(exc).__name__}: {exc}") from exc
+        return bool((result or {}).get("success", True))
+
+    def earn_redeem(self, product_id: str, amount: Optional[float]) -> bool:
+        """Guthaben zurückholen (amount=None: alles). Rückgabe: angenommen? Die Gutschrift folgt meist in Sekunden."""
+        params: dict[str, Any] = {"productId": product_id, "destAccount": "SPOT"}
+        if amount is None:
+            params["redeemAll"] = True
+        else:
+            params["amount"] = f"{amount:.8f}".rstrip("0").rstrip(".")
+        try:
+            result = self.client.sapi_post_simple_earn_flexible_redeem(params)
+        except ccxt.AuthenticationError as exc:
+            raise AuthProblem(f"Earn zurückholen: {exc}") from exc
+        except Exception as exc:
+            raise ExchangeProblem(f"Earn zurückholen: {type(exc).__name__}: {exc}") from exc
+        return bool((result or {}).get("success", True))
+
     def api_permissions(self) -> Optional[dict[str, Any]]:
         """Rechte des API-Schlüssels (nur echtes Binance). None, wenn nicht abfragbar."""
         call = getattr(self.client, "sapi_get_account_apirestrictions", None)
@@ -439,6 +508,13 @@ class SimulatedExchange:
         self.orders: dict[str, dict[str, Any]] = {}
         self.by_client_id: dict[str, str] = {}
         self._next_id = 1
+        # Simple Earn Flexible nachgespielt: angelegtes Guthaben je Währung, Zinssatz, Verzögerung/Ablehnung für Tests
+        self.earn: dict[str, float] = {}
+        self.earn_rewards: dict[str, float] = {}
+        self.earn_apr = 0.04
+        self.earn_redeem_delay: int = 0          # so viele fetch_balance-Aufrufe nach einer Rücknahme bleibt das Geld weg
+        self.earn_reject_redeem = False          # Rücknahme ablehnen (Binance: Rücknahmelimit erreicht)
+        self._earn_pending: list[tuple[str, float, int]] = []   # (Währung, Betrag, verbleibende Aufrufe)
         if wallet_path and wallet_path.exists():
             saved = json.loads(wallet_path.read_text(encoding="utf-8"))
             self.balances = {k: float(v) for k, v in saved.get("balances", {}).items()}
@@ -446,6 +522,65 @@ class SimulatedExchange:
             self._next_id = int(saved.get("next_id", 1))
             self.orders = {str(k): v for k, v in saved.get("orders", {}).items()}
             self.by_client_id = {o["clientOrderId"]: k for k, o in self.orders.items() if o.get("clientOrderId")}
+            self.earn = {k: float(v) for k, v in saved.get("earn", {}).items()}
+            self.earn_rewards = {k: float(v) for k, v in saved.get("earn_rewards", {}).items()}
+
+    # ---- Simple Earn (Schnittstelle wie ccxt: sapi_*)
+    def sapi_get_simple_earn_flexible_list(self, params: Any = None) -> dict[str, Any]:
+        asset = (params or {}).get("asset")
+        rows = [{"asset": a, "productId": f"{a}001", "latestAnnualPercentageRate": str(self.earn_apr), "canPurchase": True,
+                 "canRedeem": True} for a in ([asset] if asset else ["USDC", "USDT"])]
+        return {"rows": rows, "total": len(rows)}
+
+    def sapi_get_simple_earn_flexible_position(self, params: Any = None) -> dict[str, Any]:
+        asset = (params or {}).get("asset")
+        rows = [{"asset": a, "productId": f"{a}001", "totalAmount": repr(v), "latestAnnualPercentageRate": str(self.earn_apr),
+                 "cumulativeTotalRewards": repr(self.earn_rewards.get(a, 0.0)), "canRedeem": True}
+                for a, v in self.earn.items() if v > 0 and (not asset or a == asset)]
+        return {"rows": rows, "total": len(rows)}
+
+    def sapi_post_simple_earn_flexible_subscribe(self, params: dict[str, Any]) -> dict[str, Any]:
+        asset = str(params["productId"])[:-3]
+        amount = float(params["amount"])
+        if self.balances.get(asset, 0.0) < amount - 1e-9:
+            raise ccxt.InsufficientFunds(f"Account has insufficient balance ({asset})")
+        self.balances[asset] -= amount
+        self.earn[asset] = self.earn.get(asset, 0.0) + amount
+        self._save()
+        return {"purchaseId": self._next_id, "success": True}
+
+    def sapi_post_simple_earn_flexible_redeem(self, params: dict[str, Any]) -> dict[str, Any]:
+        asset = str(params["productId"])[:-3]
+        if self.earn_reject_redeem:
+            raise ccxt.ExchangeError("Redemption limit reached")
+        held = self.earn.get(asset, 0.0)
+        amount = held if params.get("redeemAll") else min(held, float(params["amount"]))
+        if amount <= 0:
+            raise ccxt.ExchangeError("Nothing to redeem")
+        self.earn[asset] = held - amount
+        if self.earn_redeem_delay > 0:
+            self._earn_pending.append((asset, amount, self.earn_redeem_delay))
+        else:
+            self.balances[asset] = self.balances.get(asset, 0.0) + amount
+        self._save()
+        return {"redeemId": self._next_id, "success": True}
+
+    def accrue_earn(self, days: float) -> None:
+        """Zinsen für `days` Tage gutschreiben (die Simulation hat keine Uhr; der Bot ruft es täglich auf)."""
+        for asset, held in list(self.earn.items()):
+            reward = held * self.earn_apr * days / 365.0
+            self.earn[asset] = held + reward
+            self.earn_rewards[asset] = self.earn_rewards.get(asset, 0.0) + reward
+        self._save()
+
+    def _settle_earn(self) -> None:
+        still = []
+        for asset, amount, left in self._earn_pending:
+            if left <= 1:
+                self.balances[asset] = self.balances.get(asset, 0.0) + amount
+            else:
+                still.append((asset, amount, left - 1))
+        self._earn_pending = still
 
     def current_price(self, symbol: str) -> float:  # pragma: no cover - Unterklassen
         raise NotImplementedError
@@ -468,6 +603,7 @@ class SimulatedExchange:
         return repr(float(units * Decimal(repr(tick))))
 
     def fetch_balance(self) -> dict[str, Any]:
+        self._settle_earn()
         self.process_stops()
         free = {k: v for k, v in self.balances.items()}
         used = {k: v for k, v in self.locked.items()}
@@ -623,7 +759,8 @@ class SimulatedExchange:
         keep = dict(list(self.orders.items())[-300:])           # offene und die letzten Orders (für die Order-Suche)
         keep.update({k: o for k, o in self.orders.items() if o["status"] == "open"})
         temp.write_text(json.dumps({"balances": self.balances, "locked": self.locked, "next_id": self._next_id,
-                                    "orders": keep}, indent=1), encoding="utf-8")
+                                    "orders": keep, "earn": self.earn, "earn_rewards": self.earn_rewards}, indent=1),
+                        encoding="utf-8")
         os.replace(temp, self.wallet_path)
 
 

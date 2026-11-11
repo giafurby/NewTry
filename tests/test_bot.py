@@ -182,6 +182,7 @@ def test_drawdown_emergency_stop_sells_everything_and_halts(tmp_path):
     clock.advance(4 * 3600)                                  # auch spätere Signale werden nicht gekauft
     bot.tick()
     assert not bot.st["positions"]
+    clock.advance(24 * 3600)                                 # Wartezeit nach dem Notstopp (HALT_WAIT_HOURS)
     bot.handle("/weiter")
     assert not bot.st["halted"] and bot.st["peak_equity"] == pytest.approx(bot.equity)
 

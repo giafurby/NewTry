@@ -47,6 +47,8 @@ OWN_PREFIX = "nt"            # alle Orders dieses Bots
 
 COMMANDS = [
     ("status", "Kapital, Positionen und Grenzen"),
+    ("warum", "warum heute (nicht) gekauft wurde"),
+    ("erwartung", "was in 30 Tagen statistisch zu erwarten ist"),
     ("trades", "letzte abgeschlossene Trades"),
     ("markt", "wie nah sind die Coins am Kaufsignal?"),
     ("pause", "keine neuen Käufe (Positionen laufen weiter)"),
@@ -90,8 +92,9 @@ def coin(symbol: str) -> str:
 
 class Bot:
     def __init__(self, settings: Settings, broker: Broker, telegram: Telegram, store: StateStore,
-                 clock: Callable[[], float] = time.time):
+                 clock: Callable[[], float] = time.time, sleep: Callable[[float], None] = time.sleep):
         self.s = settings
+        self.sleep = sleep
         self.broker = broker
         self.tg = telegram
         self.store = store
@@ -201,7 +204,11 @@ class Bot:
             f"an – nach jedem Kauf eine Stop-Order direkt an der Börse, {de(s.exchange_stop_buffer_pct, 1)} % unter dem "
             "Bot-Stop. Sie hält auch, wenn Bot oder Server ausfallen." if s.exchange_stop else "aus (EXCHANGE_STOP=false)"))
         lines.append(f"Notstopp für alles bei −{de(s.max_drawdown_pct, 0)} % vom Höchststand"
-                     + (f" · Tageslimit −{de(s.daily_loss_limit_pct, 0)} %" if s.daily_loss_limit_pct > 0 else ""))
+                     + (f" · Tageslimit −{de(s.daily_loss_limit_pct, 0)} %" if s.daily_loss_limit_pct > 0 else "")
+                     + (f" · danach {de(s.halt_wait_hours, 0)} h Wartezeit vor /weiter" if s.halt_wait_hours > 0 else ""))
+        if s.earn_enabled:
+            lines.append(f"🏦 Zinsen: freies {self.q} über {de(s.earn_reserve)} {self.q} Reserve wird in Simple Earn "
+                         f"angelegt und vor einem Kauf zurückgeholt (angelegt: {de(self.earn_amount)} {self.q}).")
         if st["positions"]:
             lines.append(f"Offene Positionen: {', '.join(coin(x) for x in st['positions'])}")
         if st["halted"]:
@@ -280,10 +287,17 @@ class Bot:
             self.reconcile()
             self.ensure_exchange_stops()
             self.check_limits()
+            self.manage_earn()
             self.store.save()
         self.check_dip_entries()
         self.check_entries()
         self.daily_report()
+
+    def note(self, text: str) -> None:
+        """Entscheidung für /warum merken (die letzten 40, mit Uhrzeit)."""
+        entries = list(self.st.get("decisions") or [])
+        entries.append({"at": self.now_ms(), "text": text})
+        self.st["decisions"] = entries[-40:]
 
     def alert(self, key: str, text: str) -> None:
         now = self.clock()
@@ -304,11 +318,13 @@ class Bot:
     # ------------------------------------------------------------------ Konto und Grenzen
 
     def refresh(self, after_trade: bool = False) -> None:
-        """Kontostand holen und Kapital berechnen. Ändert sich das Guthaben ohne Trade, war es eine Ein-/Auszahlung."""
+        """Kontostand holen und Kapital berechnen. Ändert sich das Guthaben ohne Trade, war es eine Ein-/Auszahlung.
+        Angelegtes Earn-Guthaben zählt zum Kapital; eine Anlage oder Rücknahme ist deshalb keine Ein-/Auszahlung."""
         balances = self.broker.balances()
         self.balances = balances
         self.quote_free = balances.free(self.q)
-        self.quote_total = balances.total(self.q)
+        self.refresh_earn()
+        self.quote_total = balances.total(self.q) + self.earn_amount
         positions = self.st["positions"]
         if positions:
             try:
@@ -318,7 +334,10 @@ class Bot:
         self.recompute_equity()
         last = self.st.get("last_quote_balance")
         if not after_trade and last is not None:
-            flow = self.quote_total - float(last)
+            rewards = self.earn_rewards_since_start()
+            interest = rewards - float(self.st.get("earn_rewards_seen") or 0.0)   # neue Zinsen seit dem letzten Mal
+            self.st["earn_rewards_seen"] = rewards
+            flow = self.quote_total - float(last) - max(0.0, interest)
             if abs(flow) >= max(1.0, 0.005 * max(self.equity, 1.0)):
                 if any(p.get("stop_order_id") for p in positions.values()) and self.check_exchange_stops():
                     return                       # das Geld kam von einer Notbremse – schon als Verkauf gebucht
@@ -330,6 +349,92 @@ class Bot:
         value = sum(p["amount"] * self.prices.get(s, p["entry_price"]) for s, p in self.st["positions"].items())
         self.equity = self.quote_total + value
 
+    # ------------------------------------------------------------------ Zinsen auf ungenutztes Guthaben (Simple Earn)
+
+    @property
+    def earn_amount(self) -> float:
+        return float((self.st.get("earn") or {}).get("amount") or 0.0)
+
+    def refresh_earn(self) -> None:
+        """Earn-Guthaben von Binance lesen (nur wenn eingeschaltet oder noch etwas angelegt ist)."""
+        earn = self.st.setdefault("earn", {})
+        if not self.s.earn_enabled and not earn.get("amount"):
+            return
+        try:
+            pos = self.broker.earn_position()
+        except (ExchangeProblem, AuthProblem) as exc:
+            log.warning("Earn-Guthaben nicht lesbar: %s", exc)   # alter Wert bleibt – lieber zu viel Kapital als Chaos
+            return
+        earn["amount"] = pos.amount
+        earn["apr"] = pos.apr
+        if pos.product_id:
+            earn["product"] = pos.product_id
+        earn["rewards"] = pos.rewards_total
+        if earn.get("rewards_at_start") is None:
+            earn["rewards_at_start"] = pos.rewards_total
+
+    def earn_rewards_since_start(self) -> float:
+        earn = self.st.get("earn") or {}
+        base = earn.get("rewards_at_start")
+        return max(0.0, float(earn.get("rewards") or 0.0) - float(base)) if base is not None else 0.0
+
+    def manage_earn(self) -> None:
+        """Alles über der Reserve anlegen (nur wenn eingeschaltet). Läuft nach jedem Kontostand-Abgleich."""
+        s, earn = self.s, self.st.setdefault("earn", {})
+        if not s.earn_enabled or self.st.get("pending") or not self.broker.earn_available():
+            return
+        if not self.s.live:
+            return
+        idle = self.quote_free - s.earn_reserve
+        if idle < 10.0:                                        # kleine Beträge nicht ständig hin und her schieben
+            return
+        try:
+            product = earn.get("product") or self.broker.earn_product_id()
+            earn["product"] = product
+            amount = float(f"{idle:.2f}")
+            if self.broker.earn_subscribe(product, amount):
+                earn["amount"] = self.earn_amount + amount
+                earn["last_action"] = f"angelegt {de(amount)} {self.q} {self.local():%d.%m. %H:%M}"
+                self.quote_free -= amount
+                self.st["last_quote_balance"] = self.quote_total          # Summe unverändert: keine Auszahlung
+                self.store.save()
+                self.tg.send(f"🏦 {de(amount)} {self.q} in Simple Earn angelegt (Reserve {de(s.earn_reserve)} {self.q} "
+                             f"bleibt frei). Angelegt jetzt: {de(self.earn_amount)} {self.q}.", silent=True)
+        except (ExchangeProblem, AuthProblem) as exc:
+            self.alert("earn", f"⚠️ Earn: Anlegen fehlgeschlagen ({exc}). Der Handel läuft normal weiter; das Guthaben "
+                               "bleibt im Spot-Konto. Fehlt dem API-Schlüssel das Recht „Simple Earn“?")
+
+    def ensure_cash(self, wanted: float) -> None:
+        """Vor einem Kauf: fehlt freies Guthaben, Earn-Guthaben zurückholen und kurz auf die Gutschrift warten."""
+        needed = wanted - self.quote_free * CASH_BUFFER
+        if needed <= 0 or self.earn_amount <= 0:
+            return
+        earn = self.st["earn"]
+        amount = min(self.earn_amount, max(needed * 1.02, 10.0))
+        try:
+            ok = self.broker.earn_redeem(earn.get("product") or self.broker.earn_product_id(), amount)
+        except (ExchangeProblem, AuthProblem) as exc:
+            self.alert("earn-redeem", f"⚠️ Earn: Rücknahme von {de(amount)} {self.q} abgelehnt ({exc}). Ich kaufe mit "
+                                      f"der Reserve ({de(self.quote_free)} {self.q} frei).")
+            return
+        if not ok:
+            return
+        earn["amount"] = max(0.0, self.earn_amount - amount)
+        earn["last_action"] = f"zurückgeholt {de(amount)} {self.q} {self.local():%d.%m. %H:%M}"
+        before = self.quote_free
+        deadline = self.clock() + self.s.earn_redeem_wait_s
+        while True:
+            balances = self.broker.balances()
+            self.balances = balances
+            self.quote_free = balances.free(self.q)
+            if self.quote_free >= before + amount * 0.99 or self.clock() >= deadline:
+                break
+            self.sleep(2.0)
+        self.st["last_quote_balance"] = self.quote_total                   # Summe unverändert: keine Einzahlung
+        if self.quote_free < before + amount * 0.99:
+            self.tg.send(f"⚠️ Earn: Rücknahme von {de(amount)} {self.q} ist nach {de(self.s.earn_redeem_wait_s, 0)} s "
+                         f"noch nicht gutgeschrieben. Ich kaufe mit dem, was frei ist ({de(self.quote_free)} {self.q}).")
+
     def record_flow(self, flow: float) -> None:
         st = self.st
         for key in ("peak_equity", "day_start_equity"):
@@ -337,7 +442,10 @@ class Bot:
                 st[key] = max(0.0, float(st[key]) + flow)
         st["net_deposits"] = float(st.get("net_deposits") or 0.0) + flow
         label = "💶 Einzahlung" if flow > 0 else "💸 Auszahlung"
-        self.tg.send(f"{label} erkannt: {signed(flow)} {self.q}. Zählt nicht als Gewinn oder Verlust.")
+        self.tg.send(f"{label} erkannt: {signed(flow)} {self.q}. Zählt nicht als Gewinn oder Verlust." + (
+            f" Kapital jetzt {de(self.equity)} {self.q}; die nächste Prüfung rechnet damit"
+            f" ({self.when(self.next_close_ms())}, Crash-Kauf alle 15 Minuten)." if flow > 0 else ""))
+        self.note(f"{label.split()[1]} {signed(flow)} {self.q} erkannt")
 
     def roll_day(self) -> None:
         today = self.local().date().isoformat()
@@ -365,9 +473,13 @@ class Bot:
     def emergency_stop(self, reason: str) -> None:
         self.st["halted"] = True
         self.st["halt_reason"] = reason
+        self.st["halted_at"] = self.now_ms()
+        self.note(f"NOTSTOPP: {reason}")
         self.store.save()
+        wait = self.s.halt_wait_hours
         self.tg.send(f"🛑 NOTSTOPP: {reason}.\nIch verkaufe alle Positionen und kaufe nichts mehr. "
-                     "Wieder starten: /weiter")
+                     + (f"Wieder starten mit /weiter, frühestens in {de(wait, 0)} Stunden – die Wartezeit ist Absicht, "
+                        "damit der Neustart eine Entscheidung ist und keine Reaktion." if wait > 0 else "Wieder starten: /weiter"))
         for symbol in list(self.st["positions"]):
             self.close_position(symbol, "Notstopp")
 
@@ -643,6 +755,7 @@ class Bot:
             self.store.save()
         icon = "✅" if pnl >= 0 else "🔻"
         label = "Crash-Kauf" if pos.get("kind") == "dip" else "Trend"
+        self.note(f"Verkauf {coin(symbol)} ({label}): {reason}, {signed(pnl)} {self.q}")
         text = [f"{icon} VERKAUF {coin(symbol)} ({label}) – {reason}",
                 f"{qty(sold)} {coin(symbol)} zu {price_text(fill.price)} → {de(proceeds)} {self.q}",
                 f"Ergebnis: {signed(pnl)} {self.q} ({pct(pnl / cost_part * 100 if cost_part else 0.0)})"]
@@ -735,6 +848,7 @@ class Bot:
             check = strategy.evaluate(symbol, closed)
             if check.signal:                     # erst nach dem Kaufversuch als erledigt merken
                 self.scan_notes[symbol] = self.try_enter(check)
+                self.note(f"Trend {coin(symbol)}: Ausbruch über das 100-Kerzen-Hoch → {self.scan_notes[symbol]}")
             done.add(symbol)
             checks.append(check)
         if failed and age + LOOP_SECONDS * 1000 < strategy.ENTRY_WINDOW_MS:
@@ -779,6 +893,7 @@ class Bot:
             check = strategy.evaluate_dip(symbol, closed, self.s.dip_drop_pct)
             if check.signal:
                 note = self.try_enter_dip(check)
+                self.note(f"Crash-Kauf {coin(symbol)}: {pct(check.change_pct)} in 4 h → {note}")
                 self.tg.send(f"⚡ Einbruch {coin(symbol)}: {pct(check.change_pct)} in 4 h – {note}",
                              silent=not note.startswith("gekauft"))
             done.add(symbol)
@@ -809,6 +924,7 @@ class Bot:
         self.refresh()
         current = self.broker.fetch_prices([symbol]).get(symbol) or check.close
         wanted = self.equity * s.dip_position_pct / 100
+        self.ensure_cash(wanted)
         budget = min(wanted, self.quote_free * CASH_BUFFER)
         minimum = max(market.min_cost, 5.0) * MIN_ORDER_BUFFER
         if budget < wanted * 0.5 or budget < minimum:
@@ -834,6 +950,9 @@ class Bot:
         held = set(self.st["positions"])
         if not signals:
             lines.append("Kein Kaufsignal.")
+            below_n = sum(1 for c in checks if c.has_data and not c.above_ema)
+            self.note(f"4h-Prüfung {self.when(candle_close)}: kein Ausbruch bei {len(checks)} Coins "
+                      f"({below_n} unter der EMA 200)")
             # Ein Coin im Bestand zählt nicht: Nach dem Kauf liegt das 100-Kerzen-Hoch durch die Ausbruchskerze selbst
             # weit über dem Kurs, die Regel würde ihn ohnehin nicht noch einmal kaufen.
             near = sorted((c for c in checks if c.above_ema and c.gap_pct > 0 and c.symbol not in held),
@@ -871,6 +990,7 @@ class Bot:
         self.refresh()
         current = self.broker.fetch_prices([symbol]).get(symbol) or check.close
         risk_money = self.equity * s.risk_per_trade_pct / 100
+        self.ensure_cash(min(risk_money / check.stop_fraction, self.equity * s.max_position_pct / 100))
         budget = min(risk_money / check.stop_fraction, self.equity * s.max_position_pct / 100,
                      self.quote_free * CASH_BUFFER)
         minimum = max(market.min_cost, 5.0) * MIN_ORDER_BUFFER
@@ -1042,6 +1162,60 @@ class Bot:
             lines.append("Letzte 24 Stunden: " + "; ".join(f"{coin(t['symbol'])} {signed(t['pnl'])}" for t in recent))
         self.tg.send("\n".join(lines))
         self.check_key_hygiene()
+        self.monthly_report()
+
+    def month_snapshot(self) -> dict[str, float]:
+        st = self.st
+        return {"equity": self.equity, "deposits": float(st.get("net_deposits") or 0.0),
+                "fees": float(st.get("fees_paid") or 0.0), "rewards": self.earn_rewards_since_start(),
+                "realized": float(st.get("realized_pnl") or 0.0)}
+
+    def monthly_report(self) -> None:
+        """Am 1. jedes Monats (mit dem Tagesbericht): Einzahlungen, Handel, Gebühren, Zinsen, Vergleich mit Halten."""
+        now = self.local()
+        month = now.strftime("%Y-%m")
+        st = self.st
+        if st.get("month") is None:                       # erster Lauf: nur den Bezugspunkt setzen
+            st["month"], st["month_start"] = month, self.month_snapshot()
+            self.store.save()
+            return
+        if st["month"] == month:
+            return
+        start = st.get("month_start") or self.month_snapshot()
+        now_snap = self.month_snapshot()
+        deposits = now_snap["deposits"] - start["deposits"]
+        result = now_snap["equity"] - start["equity"] - deposits - (now_snap["rewards"] - start["rewards"])
+        fees = now_snap["fees"] - start["fees"]
+        rewards = now_snap["rewards"] - start["rewards"]
+        trades = [t for t in st["closed"] if t.get("closed_at") and t["closed_at"][:7] == st["month"]
+                  and not t.get("selftest")]
+        wins = sum(1 for t in trades if t["pnl"] > 0)
+        base = start["equity"] + max(0.0, deposits)
+        lines = [f"📅 Monatsbericht {st['month']} · {self.tag}",
+                 f"Einzahlungen: {signed(deposits)} {self.q}",
+                 f"Handelsergebnis: {signed(result)} {self.q}" + (f" ({pct(result / base * 100)})" if base > 0 else ""),
+                 f"Gebühren: {de(fees)} {self.q} · Zinsen (Earn): {signed(rewards)} {self.q}",
+                 f"Trades: {len(trades)} ({wins} Gewinner)",
+                 f"Kapital: {de(start['equity'])} → {de(now_snap['equity'])} {self.q}"]
+        hold = self.hold_comparison(st["month"])
+        if hold is not None:
+            lines.append(f"Zum Vergleich: BTC halten {pct(hold)} im Monat")
+        lines.append("Einordnung: Ein Monat sagt wenig. Die Regel verliert in 35 % der Monate und verdient in wenigen "
+                     "großen. Was zählt, ist der Rückgang vom Höchststand – und der ist begrenzt.")
+        self.tg.send("\n".join(lines))
+        st["month"], st["month_start"] = month, now_snap
+        self.store.save()
+
+    def hold_comparison(self, month: str) -> Optional[float]:
+        """BTC-Rendite des Monats aus Tageskerzen (nur Information)."""
+        try:
+            rows = self.broker.fetch_candles(f"BTC/{self.q}", "1d", 45)
+        except ExchangeProblem:
+            return None
+        closes = [r for r in rows if datetime.fromtimestamp(r[0] / 1000, tz=timezone.utc).strftime("%Y-%m") == month]
+        if len(closes) < 2:
+            return None
+        return (closes[-1][4] / closes[0][1] - 1) * 100
 
     def check_key_hygiene(self) -> None:
         """Einmal am Tag (Echtgeld): Darf der Schlüssel auszahlen? Darf er noch handeln?"""
@@ -1069,7 +1243,12 @@ class Bot:
             f"Zustand: {state}",
             f"Kapital: {de(self.equity)} {self.q} · seit Start {signed(profit)} {self.q}"
             + (f" ({pct(profit / start * 100)})" if start else ""),
-            f"Frei: {de(self.quote_free)} {self.q} · Höchststand {de(peak)} {self.q}",
+            f"Frei: {de(self.quote_free)} {self.q}" + (f" · angelegt {de(self.earn_amount)} {self.q}"
+                                                        + (f" ({de(float(st['earn']['apr']) * 100, 1)} % p. a.)"
+                                                           if (st.get("earn") or {}).get("apr") is not None else "")
+                                                        + f" · Zinsen {signed(self.earn_rewards_since_start(), 4)} {self.q}"
+                                                        if s.earn_enabled or self.earn_amount > 0 else "")
+            + f" · Höchststand {de(peak)} {self.q}",
             f"Heute: {signed(self.equity - day_start)} {self.q}"
             + (f" · Tageslimit −{de(s.daily_loss_limit_pct, 0)} %" if s.daily_loss_limit_pct > 0 else ""),
             f"Notstopp unter {de(peak * (1 - s.max_drawdown_pct / 100))} {self.q} (−{de(s.max_drawdown_pct, 0)} % "
@@ -1129,7 +1308,7 @@ class Bot:
             "status": self.cmd_status, "trades": self.cmd_trades, "markt": self.cmd_market,
             "pause": self.cmd_pause, "weiter": self.cmd_resume, "notverkauf": self.cmd_sell_all,
             "notverkauf_ja": self.cmd_sell_all_confirm, "hilfe": self.cmd_help, "help": self.cmd_help,
-            "start": self.cmd_help,
+            "start": self.cmd_help, "warum": self.cmd_why, "erwartung": self.cmd_expectation,
         }
         handler = handlers.get(command)
         if handler is None:
@@ -1142,7 +1321,56 @@ class Bot:
             f"① Trend: Kauf direkt nach einem 4h-Kerzenschluss ({self.close_hours()} Uhr), wenn ein Coin über das Hoch "
             "der letzten 100 Kerzen ausbricht und über der EMA 200 liegt.",
             f"② Crash-Kauf: Fällt ein großer Coin in 4 Stunden um {de(self.s.dip_drop_pct, 0)} % oder mehr, kauft der Bot "
-            f"und verkauft nach {de(self.s.dip_hold_hours, 0)} Stunden wieder (Notstop −{de(self.s.dip_stop_pct, 0)} %)."]))
+            f"und verkauft nach {de(self.s.dip_hold_hours, 0)} Stunden wieder (Notstop −{de(self.s.dip_stop_pct, 0)} %).",
+            "Einzahlungen erkennt der Bot von selbst und rechnet ab der nächsten Prüfung damit. Am 1. jedes Monats "
+            "kommt ein Monatsbericht."] + ([f"🏦 Freies {self.q} über der Reserve von {de(self.s.earn_reserve)} {self.q} "
+                                          "liegt verzinst in Simple Earn und wird vor einem Kauf zurückgeholt."]
+                                         if self.s.earn_enabled else [])))
+
+    def cmd_why(self) -> None:
+        """Die Entscheidungen der letzten 24 Stunden, je ein Satz."""
+        since = self.now_ms() - 24 * 3_600_000
+        entries = [e for e in (self.st.get("decisions") or []) if int(e["at"]) >= since]
+        lines = [f"🧭 Warum · letzte 24 Stunden · {self.tag}"]
+        st = self.st
+        if st["halted"]:
+            lines.append(f"Notstopp aktiv ({st['halt_reason']}) – keine Käufe.")
+        elif st["paused"]:
+            lines.append("Pausiert (/pause) – keine Käufe.")
+        if st.get("dip_suspended"):
+            lines.append(f"Crash-Kauf ausgesetzt: {st['dip_suspended']}.")
+        if not entries:
+            lines.append("Keine Signale: Kein Coin ist über sein 100-Kerzen-Hoch ausgebrochen, keiner ist um "
+                         f"{de(self.s.dip_drop_pct, 0)} % in 4 Stunden gefallen. Das ist der Normalfall – die Regel "
+                         "handelt im Schnitt etwa 3-mal pro Woche.")
+        for e in entries[-15:]:
+            lines.append(f"• {self.when(int(e['at']))}: {e['text']}")
+        n_trend = sum(1 for p in st["positions"].values() if p.get("kind", "trend") == "trend")
+        lines.append(f"Plätze: Trend {n_trend}/{self.s.max_positions} belegt, frei {de(self.quote_free)} {self.q}"
+                     + (f", angelegt {de(self.earn_amount)} {self.q}" if self.earn_amount > 0 else "") + ".")
+        self.tg.send("\n".join(lines))
+
+    def cmd_expectation(self) -> None:
+        """Was in 30 Tagen statistisch zu erwarten ist – aus der Simulation, als Spanne."""
+        self.refresh()
+        k = self.equity
+        a, b = guards.EXPECTATION_30D["2020-2026"], guards.EXPECTATION_30D["2025-2026"]
+
+        def money(p):
+            return f"{signed(k * p / 100)} {self.q}"
+        lines = [f"🔭 Erwartung für 30 Tage · Kapital {de(k)} {self.q}",
+                 "Das ist keine Prognose, sondern die Spanne aus der Simulation 2020–10/2026 (gleiche Regeln, Kosten "
+                 "0,20 % je Seite, Kauf 1 Minute nach dem Signal):",
+                 f"• typisch (Mitte): {pct(a['p50'])} ≈ {money(a['p50'])}",
+                 f"• 25 % bis 75 %: {pct(a['p25'])} bis {pct(a['p75'])} ≈ {money(a['p25'])} bis {money(a['p75'])}",
+                 f"• 5 % bis 95 %: {pct(a['p05'])} bis {pct(a['p95'])} ≈ {money(a['p05'])} bis {money(a['p95'])}",
+                 f"• Anteil positiver 30-Tage-Abschnitte: {de(a['p_positive'] * 100, 0)} %",
+                 f"• Rückgang innerhalb der 30 Tage: meist {de(a['dd_median'], 0)} %, in 1 von 10 Fällen über "
+                 f"{de(a['dd_p90'], 0)} %, schlimmstenfalls {de(a['dd_max'], 0)} % (≈ {money(-a['dd_max'])})",
+                 f"Seit 2025 (Seitwärts-/Abwärtsmarkt) sah es so aus: Mitte {pct(b['p50'])}, 5 %–95 % {pct(b['p05'])} bis "
+                 f"{pct(b['p95'])}, positiv in {de(b['p_positive'] * 100, 0)} % der Abschnitte.",
+                 "Die großen Zahlen kommen aus wenigen Trend-Treffern. Ein Monat ohne Gewinn ist kein Fehler."]
+        self.tg.send("\n".join(lines))
 
     def cmd_status(self) -> None:
         self.refresh()
@@ -1203,6 +1431,12 @@ class Bot:
     def cmd_resume(self) -> None:
         st = self.st
         was_halted = st["halted"]
+        if was_halted and st.get("halted_at") and self.s.halt_wait_hours > 0:
+            ready = int(st["halted_at"]) + int(self.s.halt_wait_hours * 3_600_000)
+            if self.now_ms() < ready:
+                self.tg.send(f"⏳ Nach einem Notstopp geht /weiter erst ab {self.when(ready)}. Bis dahin: Was war der "
+                             f"Grund ({st['halt_reason']})? Stimmt die Einstellung noch? Fehlt Kapital?")
+                return
         was_suspended = bool(st.get("dip_suspended"))
         st["paused"] = False
         st["halted"] = False
@@ -1299,6 +1533,17 @@ def run_check(settings: Settings, broker: Broker, telegram: Telegram) -> int:
                 print("⚠ Der Schlüssel darf AUSZAHLEN. Bitte in Binance abschalten – der Bot braucht das nie.")
             if not permissions.get("ipRestrict"):
                 print("⚠ Der Schlüssel hat keine IP-Beschränkung. Empfohlen: nur die IP dieses Servers erlauben.")
+        if settings.earn_enabled:
+            try:
+                position = broker.earn_position()
+                print(f"✔ Simple Earn erreichbar: {de(position.amount)} {q} angelegt"
+                      + (f", Zinssatz {de(position.apr * 100, 2)} % p. a." if position.apr is not None else "")
+                      + f". Reserve im Spot-Konto: {de(settings.earn_reserve)} {q}.")
+            except (ExchangeProblem, AuthProblem) as exc:
+                print(f"✘ EARN_ENABLED=true, aber Simple Earn ist nicht abfragbar: {exc}\n"
+                      "  → Binance-App → API-Verwaltung → Schlüssel bearbeiten → „Simple Earn“ erlauben, "
+                      "oder EARN_ENABLED=false setzen.")
+                ok = False
     if telegram.enabled:
         sent = telegram.send("🧪 NewTry: Verbindungstest erfolgreich. Telegram funktioniert.")
         print("✔ Telegram: Testnachricht gesendet." if sent else "✘ Telegram: Senden fehlgeschlagen – "

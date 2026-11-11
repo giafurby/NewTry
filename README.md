@@ -29,7 +29,9 @@ keine API-Kosten, keine erfundenen Antworten, jede Entscheidung nachrechenbar.
 |---|---|---|
 | **Notbremse bei Binance** | nach jedem Kauf | eine Stop-Order liegt **direkt an der Börse**, 1 % unter dem Stop des Bots. Sie verkauft auch dann, wenn Bot, Server oder Internet ausfallen. Läuft der Bot, verkauft er selbst zuerst und storniert sie vorher. |
 | **Wächter** | alle 5 Minuten | meldet per Telegram, wenn der Bot nicht läuft, hängt oder die Festplatte voll ist, und startet ihn neu (höchstens einmal pro Stunde) |
-| Notstopp | −40 % vom Höchststand | **alles verkaufen und anhalten**, weiter nur mit `/weiter` (der größte Rückgang im Rückblick: 26 %) |
+| Notstopp | −30 % vom Höchststand | **alles verkaufen und anhalten**; `/weiter` erst nach 24 Stunden Wartezeit, damit der Neustart eine Entscheidung ist und keine Reaktion (der größte Rückgang im Rückblick: 26–28 %) |
+| Zinsen auf Cash | aus (`EARN_ENABLED`) | der Bot ist im Mittel nur zu etwa 27 % investiert. Eingeschaltet legt er freies USDC über einer **Reserve von 60 USDC** in Binance Simple Earn Flexible an (3–9 % im Jahr, schwankend) und holt es vor jedem Kauf zurück. Dauert die Rücknahme länger als 20 Sekunden, kauft er mit der Reserve. Zinsen zählen nicht als Einzahlung. Risiken: verzögerte Rücknahme bei extremer Marktlage, Gegenpartei Binance. |
+| Einzahlungen | automatisch | werden erkannt, sofort ins Kapital gerechnet (Positionsgröße, Notstopp-Höchststand) und ab der nächsten Prüfung gehandelt; sie zählen nie als Gewinn |
 | Sperre nach Notstop | 24 h je Coin (Crash-Kauf) | ein Coin, der wie LUNA auf null fällt, wird nicht immer wieder nachgekauft |
 | Crash-Käufe gleichzeitig | höchstens 3 | im marktweiten Crash (März 2020) nie mehr als 60 % des Kapitals im Fall |
 | Tageslimit | aus | würde genau die Crash-Käufe blockieren; einschaltbar mit `DAILY_LOSS_LIMIT_PCT` |
@@ -77,14 +79,17 @@ neuen Dienst `newtry-bot`. Scheitert sie, bleibt alles, wie es war, und das Skri
 
 | Befehl | |
 |---|---|
-| `/status` | Kapital, Gewinn seit Start, offene Positionen mit Stop und Ziel, Grenzen |
+| `/status` | Kapital, Gewinn seit Start, offene Positionen mit Stop und Ziel, Grenzen, angelegtes Guthaben und Zinsen |
+| `/warum` | jede Entscheidung der letzten 24 Stunden in einem Satz: Signale, Käufe, Ablehnungen, Verkäufe |
+| `/erwartung` | was in 30 Tagen statistisch zu erwarten ist – als Spanne aus der Simulation, auf dein Kapital umgerechnet |
 | `/markt` | wie weit jeder Coin vom Kaufsignal entfernt ist |
 | `/trades` | die letzten abgeschlossenen Trades |
 | `/pause` · `/weiter` | keine neuen Käufe bzw. wieder kaufen (`/weiter` hebt auch den Notstopp auf) |
 | `/notverkauf` | alle Positionen sofort verkaufen (mit Bestätigung `/notverkauf_ja`) |
 
-Dazu kommen von selbst: jeder Kauf und Verkauf, jeder Einbruch ab −10 % (⚡, mit Ergebnis), eine stille Meldung nach jeder
-4h-Prüfung, der Tagesbericht um 9 Uhr und Warnungen (Binance länger nicht erreichbar, Schlüssel abgelehnt, Notstopp).
+Dazu kommen von selbst: jeder Kauf und Verkauf, jeder Einbruch ab −9 % (⚡, mit Ergebnis), eine stille Meldung nach jeder
+4h-Prüfung, der Tagesbericht um 9 Uhr, am 1. jedes Monats der **Monatsbericht** (Einzahlungen, Handelsergebnis, Gebühren,
+Zinsen, Vergleich mit BTC halten) und Warnungen (Binance länger nicht erreichbar, Schlüssel abgelehnt, Notstopp).
 
 ## Auf dem Server
 

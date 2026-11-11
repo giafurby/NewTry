@@ -24,6 +24,14 @@ REFERENCE: dict[str, dict[str, float]] = {
     "trend": {"entry_drift_pct": 0.066, "median_30_pct": 2.84, "p05_30_pct": -1.69, "trades": 588},
     "dip": {"entry_drift_pct": 0.154, "median_30_pct": 1.06, "p05_30_pct": -0.89, "trades": 836},
 }
+# 30-Tage-Ergebnis der Kombination in der Simulation (lab/live_reference.py, 2020–10/2026 bzw. seit 2025), in %:
+# Quantile der Rendite über 30 Tage und Rückgang innerhalb von 30 Tagen. Für /erwartung – eine Spanne, keine Prognose.
+EXPECTATION_30D = {
+    "2020-2026": {"p05": -8.1, "p25": -3.1, "p50": 2.9, "p75": 10.4, "p95": 30.8, "p_positive": 0.62,
+                  "dd_median": 5.3, "dd_p90": 10.3, "dd_max": 18.1},
+    "2025-2026": {"p05": -11.0, "p25": -4.9, "p50": -0.4, "p75": 7.6, "p95": 17.5, "p_positive": 0.48,
+                  "dd_median": 6.2, "dd_p90": 9.5, "dd_max": 17.9},
+}
 FORWARD_WINDOW = 30
 KEEP_SLIPPAGE = 50
 LABEL = {"trend": "Trend", "dip": "Crash-Kauf"}
