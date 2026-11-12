@@ -156,9 +156,10 @@ if [[ "$first_install" == 0 ]]; then
     set_env DIP_DROP_PCT 9
     ok "Crash-Kauf schon ab −9 % statt −10 % (im Rückblick mehr Trades und mehr Gewinn bei gleichem Risiko)."
   fi
-  if [[ "$(env_value "$APP/.env" MAX_DRAWDOWN_PCT)" == "25" ]]; then
-    set_env MAX_DRAWDOWN_PCT 40
-    ok "Notstopp von −25 % auf −40 % gesetzt (der größte Rückgang im Rückblick lag bei 26 %)."
+  old_dd="$(env_value "$APP/.env" MAX_DRAWDOWN_PCT)"
+  if [[ "$old_dd" == "25" || "$old_dd" == "40" ]]; then        # frühere Standardwerte → Standard ab v3
+    set_env MAX_DRAWDOWN_PCT 30
+    ok "Notstopp von −${old_dd} % auf −30 % gesetzt (größter Rückgang im Rückblick 26–28 %; danach 24 h Wartezeit)."
   fi
 fi
 quote="$(env_value "$APP/.env" QUOTE)"
@@ -171,7 +172,7 @@ if [[ -z "$WANT_MODE" && "$first_install" == 1 ]]; then
   ${Y}Mit ECHTGELD handeln?${N}
   * Der Bot kauft und verkauft dann mit dem ${quote}-Guthaben auf deinem Binance-Konto.
   * Trend: 1 % Risiko je Trade, höchstens 3 Positionen. Crash-Kauf: 20 % je Kauf, höchstens 3, Notstop −15 %.
-  * Notstopp für alles bei −40 % vom Höchststand (im Rückblick lag der größte Rückgang bei 26 %).
+  * Notstopp für alles bei −30 % vom Höchststand, danach 24 Stunden Pause (größter Rückgang im Rückblick: 26–28 %).
   * Beim ersten Start macht er einen Funktionstest: Kauf und sofortiger Verkauf für ca. 7 ${quote}.
   * Gewinne sind NICHT garantiert. Setze nur Geld ein, dessen Verlust du verkraften kannst.
 

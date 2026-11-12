@@ -41,6 +41,10 @@ MIN_ORDER_BUFFER = 1.15      # 15 % Abstand zum Binance-Minimum je Order
 CASH_BUFFER = 0.98           # höchstens 98 % des freien Guthabens in eine Order
 MAX_RISK_FRACTION = 0.03     # die Mindest-Ordergröße nur nutzen, wenn der Trade dann höchstens 3 % riskiert
 SELFTEST_COINS = ("ETH", "BTC", "SOL", "XRP", "BNB")
+EARN_PACE_SECONDS = 3.1      # Binance: höchstens ein Earn-Auftrag (Anlage/Rücknahme) je 3 Sekunden und Konto
+EARN_TRANSIT_MAX_MS = 30 * 60_000   # so lange darf eine Rücknahme/Anlage „unterwegs“ sein, dann gilt, was Binance zeigt
+EARN_SHORT_MS = 10 * 60_000  # zeigt Binance so lange weniger Earn-Guthaben als gebucht, gilt der Wert von Binance
+EARN_RETRY_MS = 15 * 60_000  # Zurückholen nach dem Ausschalten: nach einem Fehler erst so viel später neu versuchen
 STOP_REASONS = ("Stop", "Notbremse an der Börse")
 STOP_PREFIX = "ntx"          # eigene Notbremsen bei Binance erkennt der Bot an diesem Anfang der Order-Nummer
 OWN_PREFIX = "nt"            # alle Orders dieses Bots
@@ -120,6 +124,7 @@ class Bot:
         self.outage_since: Optional[float] = None
         self.confirm_until = 0.0
         self.gone_counts: dict[str, int] = {}
+        self.last_earn_call = -1e12          # Zeit des letzten Earn-Auftrags (Abstand für Binance)
 
     # ------------------------------------------------------------------ Zeit
 
@@ -207,8 +212,9 @@ class Bot:
                      + (f" · Tageslimit −{de(s.daily_loss_limit_pct, 0)} %" if s.daily_loss_limit_pct > 0 else "")
                      + (f" · danach {de(s.halt_wait_hours, 0)} h Wartezeit vor /weiter" if s.halt_wait_hours > 0 else ""))
         if s.earn_enabled:
-            lines.append(f"🏦 Zinsen: freies {self.q} über {de(s.earn_reserve)} {self.q} Reserve wird in Simple Earn "
-                         f"angelegt und vor einem Kauf zurückgeholt (angelegt: {de(self.earn_amount)} {self.q}).")
+            lines.append(f"🏦 Zinsen: freies {self.q} über der Reserve ({de(s.earn_reserve)} {self.q}, mindestens "
+                         f"{de(s.earn_reserve_pct, 0)} % des Kapitals) wird in Simple Earn angelegt und vor einem Kauf "
+                         f"zurückgeholt (angelegt: {de(self.earn_amount)} {self.q}).")
         if st["positions"]:
             lines.append(f"Offene Positionen: {', '.join(coin(x) for x in st['positions'])}")
         if st["halted"]:
@@ -317,14 +323,17 @@ class Bot:
 
     # ------------------------------------------------------------------ Konto und Grenzen
 
-    def refresh(self, after_trade: bool = False) -> None:
+    def refresh(self, after_trade: bool = False, with_earn: bool = True) -> None:
         """Kontostand holen und Kapital berechnen. Ändert sich das Guthaben ohne Trade, war es eine Ein-/Auszahlung.
-        Angelegtes Earn-Guthaben zählt zum Kapital; eine Anlage oder Rücknahme ist deshalb keine Ein-/Auszahlung."""
+        Zum Kapital zählen das eigene Earn-Guthaben des Bots (sein Hauptbuch) und eine Rücknahme oder Anlage, die gerade
+        unterwegs ist – eine Umbuchung zwischen Spot und Earn ist deshalb nie eine Ein- oder Auszahlung.
+        with_earn=False (vor einem Verkauf): Binance Earn nicht abfragen, damit nichts den Verkauf aufhält."""
         balances = self.broker.balances()
         self.balances = balances
         self.quote_free = balances.free(self.q)
-        self.refresh_earn()
-        self.quote_total = balances.total(self.q) + self.earn_amount
+        interest = self.refresh_earn() if with_earn else 0.0
+        spot = balances.total(self.q)
+        self.quote_total = spot + self.earn_amount + self.earn_transit(spot)
         positions = self.st["positions"]
         if positions:
             try:
@@ -334,10 +343,7 @@ class Bot:
         self.recompute_equity()
         last = self.st.get("last_quote_balance")
         if not after_trade and last is not None:
-            rewards = self.earn_rewards_since_start()
-            interest = rewards - float(self.st.get("earn_rewards_seen") or 0.0)   # neue Zinsen seit dem letzten Mal
-            self.st["earn_rewards_seen"] = rewards
-            flow = self.quote_total - float(last) - max(0.0, interest)
+            flow = self.quote_total - float(last) - interest          # Zinsen sind Ertrag, kein Kapitalfluss
             if abs(flow) >= max(1.0, 0.005 * max(self.equity, 1.0)):
                 if any(p.get("stop_order_id") for p in positions.values()) and self.check_exchange_stops():
                     return                       # das Geld kam von einer Notbremse – schon als Verkauf gebucht
@@ -355,63 +361,195 @@ class Bot:
     def earn_amount(self) -> float:
         return float((self.st.get("earn") or {}).get("amount") or 0.0)
 
-    def refresh_earn(self) -> None:
-        """Earn-Guthaben von Binance lesen (nur wenn eingeschaltet oder noch etwas angelegt ist)."""
+    @property
+    def earn_reserve(self) -> float:
+        """So viel bleibt immer frei im Spot-Konto: der feste Betrag, mindestens aber der Prozentsatz vom Kapital."""
+        return max(self.s.earn_reserve, self.equity * self.s.earn_reserve_pct / 100)
+
+    def refresh_earn(self) -> float:
+        """Earn-Position bei Binance lesen (nur wenn eingeschaltet oder der Bot dort noch etwas hat). Neue Zinsen werden
+        dem Hauptbuch gutgeschrieben – nur der Anteil, der dem Bot gehört. Rückgabe: gutgeschriebene Zinsen.
+        Ein Fehler hier stört den Handel nie: Dann gilt das Hauptbuch, und nächste Minute folgt der nächste Versuch."""
         earn = self.st.setdefault("earn", {})
-        if not self.s.earn_enabled and not earn.get("amount"):
-            return
+        if not self.s.earn_enabled and not self.earn_amount and not earn.get("transit"):
+            return 0.0
         try:
             pos = self.broker.earn_position()
-        except (ExchangeProblem, AuthProblem) as exc:
-            log.warning("Earn-Guthaben nicht lesbar: %s", exc)   # alter Wert bleibt – lieber zu viel Kapital als Chaos
-            return
-        earn["amount"] = pos.amount
+        except Exception as exc:                                    # auch unerwartete Antworten von Binance
+            log.warning("Earn-Guthaben nicht lesbar: %s", exc)
+            return 0.0
         earn["apr"] = pos.apr
         if pos.product_id:
             earn["product"] = pos.product_id
-        earn["rewards"] = pos.rewards_total
-        if earn.get("rewards_at_start") is None:
-            earn["rewards_at_start"] = pos.rewards_total
+        earn["position"] = pos.amount
+        credited = 0.0
+        seen = earn.get("rewards_seen")
+        if seen is not None and pos.rewards_total > float(seen):
+            new = pos.rewards_total - float(seen)
+            base = pos.amount - new                                 # Position vor diesen Zinsen
+            credited = new * (min(1.0, self.earn_amount / base) if base > 0 else 1.0)
+            earn["amount"] = self.earn_amount + credited
+            earn["interest"] = float(earn.get("interest") or 0.0) + credited
+        # Binance zählt die Zinsen je Position; nach einer vollen Rücknahme beginnt der Zähler bei 0 – nie rückwärts buchen
+        earn["rewards_seen"] = pos.rewards_total
+        # Hauptbuch über der ganzen Position? Binance zeigt eine Anlage manchmal erst später. Bleibt es so (z. B. in der
+        # App zurückgeholt), gilt der Wert von Binance.
+        if not earn.get("transit") and pos.amount < self.earn_amount - max(0.05, 0.002 * self.earn_amount):
+            since = int(earn.get("short_since") or self.now_ms())
+            earn["short_since"] = since
+            if self.now_ms() - since >= EARN_SHORT_MS:
+                log.warning("Earn-Hauptbuch %.4f über der Position %.4f – übernehme Binance", self.earn_amount, pos.amount)
+                earn["amount"] = pos.amount
+                earn["short_since"] = None
+        else:
+            earn["short_since"] = None
+        return credited
+
+    def earn_transit(self, spot: float) -> float:
+        """Betrag einer Rücknahme (+) oder Anlage (−), die Binance angenommen hat, die das Spot-Konto aber noch nicht zeigt.
+        Er zählt bis dahin weiter zum Kapital – sonst sähe eine verspätete Gutschrift wie eine Auszahlung und danach wie
+        eine Einzahlung aus. Nach EARN_TRANSIT_MAX_MS gilt, was Binance zeigt."""
+        earn = self.st.get("earn") or {}
+        transit = earn.get("transit")
+        if not transit:
+            return 0.0
+        amount = float(transit["amount"])
+        tolerance = max(0.05, 0.01 * abs(amount))
+        expected = float(transit["spot_expected"])
+        if (spot >= expected - tolerance) if amount > 0 else (spot <= expected + tolerance):
+            earn["transit"] = None                                  # angekommen
+            return 0.0
+        if self.now_ms() - int(transit["at"]) <= EARN_TRANSIT_MAX_MS:
+            return amount
+        earn["transit"] = None
+        position, before = earn.get("position"), transit.get("position_before")
+        if position is not None and before is not None:
+            if amount > 0 and float(position) >= float(before) - tolerance:
+                earn["amount"] = self.earn_amount + amount          # Binance hat die Rücknahme nicht ausgeführt
+            elif amount < 0 and float(position) <= float(before) + tolerance:
+                earn["amount"] = max(0.0, self.earn_amount + amount)   # … oder die Anlage nicht
+        self.alert("earn-transit", f"⚠️ Earn: Die {'Rücknahme' if amount > 0 else 'Anlage'} von {de(abs(amount))} "
+                                   f"{self.q} zeigt das Spot-Konto auch nach {EARN_TRANSIT_MAX_MS // 60_000} Minuten "
+                                   "nicht. Ab jetzt gilt, was Binance zeigt – bitte in der App unter Earn nachsehen.")
+        return 0.0
+
+    def shift_transit(self, quote_delta: float) -> None:
+        """Eigener Kauf (−) oder Verkauf (+) während einer Umbuchung: den erwarteten Spot-Stand mitführen."""
+        transit = (self.st.get("earn") or {}).get("transit")
+        if transit:
+            transit["spot_expected"] = float(transit["spot_expected"]) + quote_delta
+
+    def settle_spot(self) -> None:
+        """Nach einer Umbuchung das Spot-Konto neu lesen; ist sie dort schon zu sehen, endet der Transit."""
+        try:
+            balances = self.broker.balances()
+        except (ExchangeProblem, AuthProblem) as exc:
+            log.warning("Kontostand nach Earn-Umbuchung nicht lesbar: %s", exc)
+            return
+        self.balances = balances
+        self.quote_free = balances.free(self.q)
+        spot = balances.total(self.q)
+        self.quote_total = spot + self.earn_amount + self.earn_transit(spot)
+        self.recompute_equity()
+
+    def earn_pace(self) -> None:
+        """Binance nimmt Earn-Aufträge höchstens alle 3 Sekunden je Konto an (sonst „Too many requests“)."""
+        wait = self.last_earn_call + EARN_PACE_SECONDS - self.clock()
+        if wait > 0:
+            self.sleep(wait)
+        self.last_earn_call = self.clock()
 
     def earn_rewards_since_start(self) -> float:
-        earn = self.st.get("earn") or {}
-        base = earn.get("rewards_at_start")
-        return max(0.0, float(earn.get("rewards") or 0.0) - float(base)) if base is not None else 0.0
+        """Dem Bot gutgeschriebene Zinsen seit Start (zählt nur vorwärts)."""
+        return float((self.st.get("earn") or {}).get("interest") or 0.0)
 
     def manage_earn(self) -> None:
-        """Alles über der Reserve anlegen (nur wenn eingeschaltet). Läuft nach jedem Kontostand-Abgleich."""
-        s, earn = self.s, self.st.setdefault("earn", {})
-        if not s.earn_enabled or self.st.get("pending") or not self.broker.earn_available():
+        """Nur Echtgeld, läuft nach jedem Kontostand-Abgleich. Eingeschaltet: freies Guthaben über der Reserve in Simple
+        Earn anlegen (nicht im Notstopp). Ausgeschaltet: das eigene Earn-Guthaben des Bots zurück ins Spot-Konto holen."""
+        s, st = self.s, self.st
+        earn = st.setdefault("earn", {})
+        if not s.live or st.get("pending") or earn.get("transit") or not self.broker.earn_available():
             return
-        if not self.s.live:
+        if not s.earn_enabled:
+            if self.earn_amount > 0 and self.now_ms() >= int(earn.get("retry_at") or 0):
+                self.redeem_earn_back()
             return
-        idle = self.quote_free - s.earn_reserve
+        if st["halted"]:
+            return
+        reserve = self.earn_reserve
+        idle = self.quote_free - reserve
         if idle < 10.0:                                        # kleine Beträge nicht ständig hin und her schieben
             return
+        amount = int(idle * 100) / 100
         try:
             product = earn.get("product") or self.broker.earn_product_id()
             earn["product"] = product
-            amount = float(f"{idle:.2f}")
-            if self.broker.earn_subscribe(product, amount):
-                earn["amount"] = self.earn_amount + amount
-                earn["last_action"] = f"angelegt {de(amount)} {self.q} {self.local():%d.%m. %H:%M}"
-                self.quote_free -= amount
-                self.st["last_quote_balance"] = self.quote_total          # Summe unverändert: keine Auszahlung
-                self.store.save()
-                self.tg.send(f"🏦 {de(amount)} {self.q} in Simple Earn angelegt (Reserve {de(s.earn_reserve)} {self.q} "
-                             f"bleibt frei). Angelegt jetzt: {de(self.earn_amount)} {self.q}.", silent=True)
+            spot_before = self.broker.balances().total(self.q)
+            self.earn_pace()
+            ok = self.broker.earn_subscribe(product, amount)
         except (ExchangeProblem, AuthProblem) as exc:
             self.alert("earn", f"⚠️ Earn: Anlegen fehlgeschlagen ({exc}). Der Handel läuft normal weiter; das Guthaben "
-                               "bleibt im Spot-Konto. Fehlt dem API-Schlüssel das Recht „Simple Earn“?")
+                               "bleibt im Spot-Konto. Prüfe die Rechte des API-Schlüssels (Spot-Handel muss erlaubt sein).")
+            return
+        if not ok:
+            return
+        earn["amount"] = self.earn_amount + amount
+        earn["transit"] = {"amount": -amount, "spot_expected": spot_before - amount, "at": self.now_ms(),
+                           "position_before": earn.get("position")}
+        earn["position"] = float(earn.get("position") or 0.0) + amount     # bis Binance den neuen Stand zeigt
+        earn["last_action"] = f"angelegt {de(amount)} {self.q} {self.local():%d.%m. %H:%M}"
+        self.settle_spot()
+        self.store.save()
+        self.tg.send(f"🏦 {de(amount)} {self.q} in Simple Earn angelegt (Reserve {de(reserve)} {self.q} bleibt frei). "
+                     f"Angelegt jetzt: {de(self.earn_amount)} {self.q}.", silent=True)
+
+    def redeem_earn_back(self) -> None:
+        """Earn ist ausgeschaltet, der Bot hat aber noch Guthaben dort: alles Eigene zurückholen (Fremdes bleibt liegen)."""
+        earn = self.st["earn"]
+        position = earn.get("position")
+        amount = self.earn_amount if position is None else min(self.earn_amount, float(position))
+        if amount < 0.01:
+            earn["amount"] = 0.0
+            return
+        try:
+            spot_before = self.broker.balances().total(self.q)
+            self.earn_pace()
+            ok = self.broker.earn_redeem(earn.get("product") or self.broker.earn_product_id(), amount)
+        except (ExchangeProblem, AuthProblem) as exc:
+            earn["retry_at"] = self.now_ms() + EARN_RETRY_MS
+            self.alert("earn-off", f"⚠️ Earn ist ausgeschaltet, aber {de(amount)} {self.q} des Bots liegen noch in Simple "
+                                   f"Earn. Zurückholen fehlgeschlagen ({exc}); nächster Versuch in 15 Minuten. Das Geld "
+                                   "zählt weiter zum Kapital.")
+            return
+        if not ok:
+            earn["retry_at"] = self.now_ms() + EARN_RETRY_MS
+            return
+        earn["amount"] = max(0.0, self.earn_amount - amount)
+        earn["transit"] = {"amount": amount, "spot_expected": spot_before + amount, "at": self.now_ms(),
+                           "position_before": position}
+        earn["position"] = max(0.0, float(position or 0.0) - amount)
+        earn["last_action"] = f"zurückgeholt {de(amount)} {self.q} {self.local():%d.%m. %H:%M} (Earn aus)"
+        self.settle_spot()
+        self.store.save()
+        self.tg.send(f"🏦 Earn ist ausgeschaltet: {de(amount)} {self.q} aus Simple Earn zurück ins Spot-Konto geholt.")
 
     def ensure_cash(self, wanted: float) -> None:
-        """Vor einem Kauf: fehlt freies Guthaben, Earn-Guthaben zurückholen und kurz auf die Gutschrift warten."""
+        """Vor einem Kauf: Fehlt freies Guthaben, eigenes Earn-Guthaben zurückholen und kurz auf die Gutschrift warten.
+        Kommt sie nicht rechtzeitig, kauft der Bot mit dem, was frei ist; der Betrag zählt bis zur Gutschrift weiter zum
+        Kapital. Nur Echtgeld, nie zwei Umbuchungen gleichzeitig, höchstens ein Earn-Auftrag je 3 Sekunden."""
         needed = wanted - self.quote_free * CASH_BUFFER
-        if needed <= 0 or self.earn_amount <= 0:
+        earn = self.st.setdefault("earn", {})
+        if needed <= 0 or self.earn_amount <= 0 or not self.s.live or earn.get("transit"):
             return
-        earn = self.st["earn"]
+        position = earn.get("position")
         amount = min(self.earn_amount, max(needed * 1.02, 10.0))
+        if position is not None:
+            amount = min(amount, float(position))                   # nie mehr, als Binance zeigt
+        if amount < 0.01:
+            return
         try:
+            spot_before = self.broker.balances().total(self.q)
+            self.earn_pace()
             ok = self.broker.earn_redeem(earn.get("product") or self.broker.earn_product_id(), amount)
         except (ExchangeProblem, AuthProblem) as exc:
             self.alert("earn-redeem", f"⚠️ Earn: Rücknahme von {de(amount)} {self.q} abgelehnt ({exc}). Ich kaufe mit "
@@ -420,26 +558,32 @@ class Bot:
         if not ok:
             return
         earn["amount"] = max(0.0, self.earn_amount - amount)
+        earn["transit"] = {"amount": amount, "spot_expected": spot_before + amount, "at": self.now_ms(),
+                           "position_before": position}
+        earn["position"] = max(0.0, float(position or 0.0) - amount)
         earn["last_action"] = f"zurückgeholt {de(amount)} {self.q} {self.local():%d.%m. %H:%M}"
-        before = self.quote_free
         deadline = self.clock() + self.s.earn_redeem_wait_s
         while True:
-            balances = self.broker.balances()
-            self.balances = balances
-            self.quote_free = balances.free(self.q)
-            if self.quote_free >= before + amount * 0.99 or self.clock() >= deadline:
+            self.settle_spot()
+            if not earn.get("transit") or self.clock() >= deadline:
                 break
             self.sleep(2.0)
-        self.st["last_quote_balance"] = self.quote_total                   # Summe unverändert: keine Einzahlung
-        if self.quote_free < before + amount * 0.99:
+        self.store.save()
+        if earn.get("transit"):
             self.tg.send(f"⚠️ Earn: Rücknahme von {de(amount)} {self.q} ist nach {de(self.s.earn_redeem_wait_s, 0)} s "
-                         f"noch nicht gutgeschrieben. Ich kaufe mit dem, was frei ist ({de(self.quote_free)} {self.q}).")
+                         f"noch nicht gutgeschrieben. Ich kaufe mit dem, was frei ist ({de(self.quote_free)} {self.q}); "
+                         "der Betrag zählt bis zur Gutschrift weiter zum Kapital.")
 
     def record_flow(self, flow: float) -> None:
+        """Ein- oder Auszahlung buchen – zählt nie als Gewinn oder Verlust. Einzahlung: Höchststand und Tagesbeginn steigen
+        um den Betrag. Auszahlung: Beide sinken im selben Verhältnis wie das Kapital. Der Rückgang in Prozent bleibt
+        gleich – eine Auszahlung kann den Notstopp also nie auslösen."""
         st = self.st
+        before = self.equity - flow
+        shrink = max(0.0, self.equity) / before if flow < 0 and before > 0 else None
         for key in ("peak_equity", "day_start_equity"):
             if st.get(key) is not None:
-                st[key] = max(0.0, float(st[key]) + flow)
+                st[key] = float(st[key]) * shrink if shrink is not None else max(0.0, float(st[key]) + flow)
         st["net_deposits"] = float(st.get("net_deposits") or 0.0) + flow
         label = "💶 Einzahlung" if flow > 0 else "💸 Auszahlung"
         self.tg.send(f"{label} erkannt: {signed(flow)} {self.q}. Zählt nicht als Gewinn oder Verlust." + (
@@ -686,7 +830,7 @@ class Bot:
             pos = self.st["positions"].get(symbol)
             if not pos:
                 return True                       # die Notbremse hatte schon alles verkauft
-        self.refresh()
+        self.refresh(with_earn=False)             # vor einem Verkauf nichts abfragen, was ihn aufhalten könnte
         mark = self.prices.get(symbol) or pos["entry_price"]
         # Eigene Reste früherer Trades mitverkaufen (Binance zieht die Kaufgebühr vom Coin ab, dadurch bleibt beim
         # Abrunden auf die Schrittweite jedes Mal ein kleiner Rest liegen). Nie mehr als das, was frei auf dem Konto liegt.
@@ -725,11 +869,14 @@ class Bot:
         remaining = pos["amount"] - min(sold, pos["amount"])
         partial = market is not None and remaining * fill.price >= market.min_cost
         cost_part = pos["cost"] * (sold / pos["amount"]) if partial and pos["amount"] > 0 else pos["cost"]
-        proceeds = fill.cost - fill.fee_quote - fill.fee_other
+        # Beim Verkauf zieht Binance eine Gebühr in der Basiswährung (BNB/USDC mit BNB-Rabatt) vom übrigen BNB ab: Kosten
+        # des Trades, aber außerhalb des Kapitals – wie eine Gebühr in einer dritten Währung
+        external = fill.fee_other + fill.fee_base * fill.price
+        proceeds = fill.cost - fill.fee_quote - external
         pnl = proceeds - cost_part
         st["realized_pnl"] = float(st.get("realized_pnl") or 0.0) + pnl
         st["fees_paid"] = float(st.get("fees_paid") or 0.0) + fill.fee_value
-        st["fees_external"] = float(st.get("fees_external") or 0.0) + fill.fee_other
+        st["fees_external"] = float(st.get("fees_external") or 0.0) + external
         if partial:
             pos["amount"] = remaining
             pos["cost"] -= cost_part
@@ -741,7 +888,8 @@ class Bot:
         trade = self._trade_record(symbol, pos, sold, cost_part, proceeds, fill.price, reason)
         st["closed"] = (st["closed"] + [trade])[-500:]
         st["pending"] = None
-        self.refresh(after_trade=True)
+        self.shift_transit(fill.cost - fill.fee_quote)          # so viel USDC kommt ins Spot-Konto
+        self.refresh(after_trade=True, with_earn=False)
         if pos.get("selftest"):
             st["selftest_done"] = True
         self.store.save()
@@ -921,7 +1069,7 @@ class Bot:
         if st.get("pending"):
             return "nicht gekauft – vorherige Order wird noch geklärt"
         market = self.broker.ensure_market(symbol)
-        self.refresh()
+        self.refresh(with_earn=False)                 # vor einem Kauf: Earn nicht abfragen (Tempo)
         current = self.broker.fetch_prices([symbol]).get(symbol) or check.close
         wanted = self.equity * s.dip_position_pct / 100
         self.ensure_cash(wanted)
@@ -987,7 +1135,7 @@ class Bot:
         if st.get("pending"):
             return "nicht gekauft – vorherige Order wird noch geklärt"
         market = self.broker.ensure_market(symbol)
-        self.refresh()
+        self.refresh(with_earn=False)                 # vor einem Kauf: Earn nicht abfragen (Tempo)
         current = self.broker.fetch_prices([symbol]).get(symbol) or check.close
         risk_money = self.equity * s.risk_per_trade_pct / 100
         self.ensure_cash(min(risk_money / check.stop_fraction, self.equity * s.max_position_pct / 100))
@@ -1033,7 +1181,8 @@ class Bot:
         st = self.st
         symbol = info["symbol"]
         market = self.broker.ensure_market(symbol)
-        self.refresh(after_trade=True)
+        self.shift_transit(-(fill.cost + fill.fee_quote))       # so viel USDC hat der Kauf gekostet
+        self.refresh(after_trade=True, with_earn=False)
         net = fill.net_amount
         if info.get("base_before") is not None and market is not None:
             received = self.balances.total(market.base) - float(info["base_before"])
@@ -1168,7 +1317,8 @@ class Bot:
         st = self.st
         return {"equity": self.equity, "deposits": float(st.get("net_deposits") or 0.0),
                 "fees": float(st.get("fees_paid") or 0.0), "rewards": self.earn_rewards_since_start(),
-                "realized": float(st.get("realized_pnl") or 0.0)}
+                "realized": float(st.get("realized_pnl") or 0.0), "external": float(st.get("fees_external") or 0.0),
+                "at": self.now_ms()}
 
     def monthly_report(self) -> None:
         """Am 1. jedes Monats (mit dem Tagesbericht): Einzahlungen, Handel, Gebühren, Zinsen, Vergleich mit Halten."""
@@ -1184,14 +1334,22 @@ class Bot:
         start = st.get("month_start") or self.month_snapshot()
         now_snap = self.month_snapshot()
         deposits = now_snap["deposits"] - start["deposits"]
-        result = now_snap["equity"] - start["equity"] - deposits - (now_snap["rewards"] - start["rewards"])
-        fees = now_snap["fees"] - start["fees"]
         rewards = now_snap["rewards"] - start["rewards"]
-        trades = [t for t in st["closed"] if t.get("closed_at") and t["closed_at"][:7] == st["month"]
-                  and not t.get("selftest")]
+        external = now_snap["external"] - float(start.get("external") or 0.0)   # BNB-Gebühren: nicht im Kapital
+        result = now_snap["equity"] - start["equity"] - deposits - rewards - external
+        fees = now_snap["fees"] - start["fees"]
+        since_ms = start.get("at")
+        if since_ms:                                      # gezählt wird genau der Zeitraum, für den Kapital gemessen wurde
+            trades = [t for t in st["closed"] if t.get("closed_at") and not t.get("selftest")
+                      and datetime.fromisoformat(t["closed_at"]).timestamp() * 1000 >= int(since_ms)]
+        else:
+            trades = [t for t in st["closed"] if t.get("closed_at") and t["closed_at"][:7] == st["month"]
+                      and not t.get("selftest")]
         wins = sum(1 for t in trades if t["pnl"] > 0)
         base = start["equity"] + max(0.0, deposits)
-        lines = [f"📅 Monatsbericht {st['month']} · {self.tag}",
+        partial = bool(since_ms) and self.local(int(since_ms)).day != 1
+        lines = [f"📅 Monatsbericht {st['month']}" + (f" (ab {self.when(int(since_ms))})" if partial else "")
+                 + f" · {self.tag}",
                  f"Einzahlungen: {signed(deposits)} {self.q}",
                  f"Handelsergebnis: {signed(result)} {self.q}" + (f" ({pct(result / base * 100)})" if base > 0 else ""),
                  f"Gebühren: {de(fees)} {self.q} · Zinsen (Earn): {signed(rewards)} {self.q}",
@@ -1323,8 +1481,9 @@ class Bot:
             f"② Crash-Kauf: Fällt ein großer Coin in 4 Stunden um {de(self.s.dip_drop_pct, 0)} % oder mehr, kauft der Bot "
             f"und verkauft nach {de(self.s.dip_hold_hours, 0)} Stunden wieder (Notstop −{de(self.s.dip_stop_pct, 0)} %).",
             "Einzahlungen erkennt der Bot von selbst und rechnet ab der nächsten Prüfung damit. Am 1. jedes Monats "
-            "kommt ein Monatsbericht."] + ([f"🏦 Freies {self.q} über der Reserve von {de(self.s.earn_reserve)} {self.q} "
-                                          "liegt verzinst in Simple Earn und wird vor einem Kauf zurückgeholt."]
+            "kommt ein Monatsbericht."] + ([f"🏦 Freies {self.q} über der Reserve ({de(self.s.earn_reserve)} {self.q}, "
+                                          f"mindestens {de(self.s.earn_reserve_pct, 0)} % des Kapitals) liegt verzinst "
+                                          "in Simple Earn und wird vor einem Kauf zurückgeholt."]
                                          if self.s.earn_enabled else [])))
 
     def cmd_why(self) -> None:
@@ -1365,8 +1524,9 @@ class Bot:
                  f"• 25 % bis 75 %: {pct(a['p25'])} bis {pct(a['p75'])} ≈ {money(a['p25'])} bis {money(a['p75'])}",
                  f"• 5 % bis 95 %: {pct(a['p05'])} bis {pct(a['p95'])} ≈ {money(a['p05'])} bis {money(a['p95'])}",
                  f"• Anteil positiver 30-Tage-Abschnitte: {de(a['p_positive'] * 100, 0)} %",
-                 f"• Rückgang innerhalb der 30 Tage: meist {de(a['dd_median'], 0)} %, in 1 von 10 Fällen über "
-                 f"{de(a['dd_p90'], 0)} %, schlimmstenfalls {de(a['dd_max'], 0)} % (≈ {money(-a['dd_max'])})",
+                 f"• Rückgang innerhalb der 30 Tage (minutengenau, wie der Notstopp misst): meist "
+                 f"{de(a['dd_median'], 0)} %, in 1 von 10 Fällen über {de(a['dd_p90'], 0)} %, im Rückblick höchstens "
+                 f"{de(a['dd_max'], 0)} % (≈ {money(-a['dd_max'])}) – die Zukunft kann schlechter sein",
                  f"Seit 2025 (Seitwärts-/Abwärtsmarkt) sah es so aus: Mitte {pct(b['p50'])}, 5 %–95 % {pct(b['p05'])} bis "
                  f"{pct(b['p95'])}, positiv in {de(b['p_positive'] * 100, 0)} % der Abschnitte.",
                  "Die großen Zahlen kommen aus wenigen Trend-Treffern. Ein Monat ohne Gewinn ist kein Fehler."]
@@ -1538,11 +1698,12 @@ def run_check(settings: Settings, broker: Broker, telegram: Telegram) -> int:
                 position = broker.earn_position()
                 print(f"✔ Simple Earn erreichbar: {de(position.amount)} {q} angelegt"
                       + (f", Zinssatz {de(position.apr * 100, 2)} % p. a." if position.apr is not None else "")
-                      + f". Reserve im Spot-Konto: {de(settings.earn_reserve)} {q}.")
+                      + f". Reserve im Spot-Konto: {de(settings.earn_reserve)} {q}, mindestens "
+                      f"{de(settings.earn_reserve_pct, 0)} % des Kapitals. Der Bot rechnet nur, was ER dort anlegt.")
             except (ExchangeProblem, AuthProblem) as exc:
                 print(f"✘ EARN_ENABLED=true, aber Simple Earn ist nicht abfragbar: {exc}\n"
-                      "  → Binance-App → API-Verwaltung → Schlüssel bearbeiten → „Simple Earn“ erlauben, "
-                      "oder EARN_ENABLED=false setzen.")
+                      "  → Binance-App → API-Verwaltung → Schlüssel bearbeiten: Lesen und Spot-Handel müssen erlaubt "
+                      "sein. Sonst EARN_ENABLED=false setzen.")
                 ok = False
     if telegram.enabled:
         sent = telegram.send("🧪 NewTry: Verbindungstest erfolgreich. Telegram funktioniert.")

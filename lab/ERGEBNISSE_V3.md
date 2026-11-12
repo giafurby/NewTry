@@ -20,12 +20,28 @@ nach dem Signal. Hebel 1 ergibt exakt die bekannte Kombi (Abweichung 0).
 | 3,0× | +278,4 % im Jahr | 63 % | +28 % | −3,9 % im Jahr | 0 |
 | 5,0× | +285,7 % im Jahr | 97 % | +18 % | −36,9 % im Jahr | 1 |
 
-Zins 8 % im Jahr; mit 15 % fast gleich (z. B. 2,0× seit 2025: +5,1 % statt +6,1 %). Kelly-Hebel aus den Tagesrenditen
-der Kombi: 2020–2026 voll 6,4×, halb 3,2×; **seit 2025 voll 1,6×, halb 0,8×**.
+Zins 8 % im Jahr; mit 15 % fast gleich (z. B. 2,0× seit 2025: +5,1 % statt +6,1 %). Die einzige Zwangsliquidation (5×)
+war am 19.05.2021: Das Kapital fiel an einem Tag um 94,5 % vom Höchststand. Kelly-Hebel aus den Tagesrenditen der Kombi:
+2020–2026 voll 6,4×, halb 3,2×; seit 2025 voll 1,6×, halb 0,8× – mit Kreditzins 8 % nur noch 0,44×, und der
+Standardfehler ist so groß, dass das Band von −3,9× bis 7,0× reicht. Kelly sagt hier nichts Verlässliches.
 
-Folgerung: Hebel vervielfacht vor allem die Bullenjahre 2020, 2021 und 2024. Seit 2025 bringt 1,5× fast nichts
-(+8,2 % statt +7,9 %), 2× weniger, ab 3× Verlust. Schon ab 1,5× ist der größte Rückgang größer als der Notstopp des Bots
-(30 %) – der Bot wäre dort angehalten worden, was in dieser Rechnung nicht enthalten ist. Der Bot bleibt ohne Hebel.
+**Mit dem Notstopp des Bots gerechnet** (−30 % vom Höchststand → alles verkaufen, Pause, danach gilt das Kapital als neuer
+Höchststand; frischer Start 01/2025; nachgerechnet vom Prüfagenten und hier reproduziert):
+
+| Hebel | Pause 24 h: Ertrag seit 2025 | größter Rückgang | Notstopps | Pause 7 Tage: Ertrag seit 2025 |
+|---|---|---|---|---|
+| 1,0× | +7,9 % im Jahr | 26 % | 0 | +7,9 % im Jahr |
+| 1,5× | +6,2 % | 40 % | 2 | +5,2 % |
+| 2,0× | +7,1 % | 44 % | 3 | +1,4 % |
+| 3,0× | +23,7 % | 52 % | 6 | +10,6 % |
+
+Folgerung: Hebel vervielfacht vor allem die Bullenjahre 2020, 2021 und 2024. Seit 2025 hängt das Ergebnis an Annahmen:
+Ohne Notstopp schadet Hebel ab 2×, mit Notstopp sieht 3× gut aus – aber mit 6 Notstopps in 22 Monaten und mehr als der
+Hälfte Rückgang, und eine Woche statt einen Tag Pause halbiert den Vorteil (2× fällt auf +1,4 %). Das ist kein
+verlässlicher Vorteil, sondern ein großer Einsatz auf eine Annahme. Nicht enthalten (macht Hebel schlechter): Höchsthebel
+und Leihgrenzen bei Binance, steigende USDC-Zinsen gerade in Crashs, in denen die Crash-Käufe leihen. Nicht enthalten
+(macht Hebel besser): Stops, die vor der Liquidation greifen (dann gab es 2020–26 keine Liquidation). Der Bot bleibt
+ohne Hebel.
 
 ## 2. Copy-Trading-Ranglisten: Können oder Glück? (`lab/copy_luck.py`)
 
