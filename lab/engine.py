@@ -559,3 +559,142 @@ def sim_weights_dd(CF, EP, W, rebal, cost, band, dd_max, cool_bars, start, end):
                         orders += 1
             r += 1
     return eq, turnover, orders, trips
+
+
+@njit(cache=True)
+def sim_joint_lev(O, H, L, CF, EP, sigA, stopA, tgtA, holdA, riskA, capA, kA, minA,
+                  sigB, stopB, holdB, sizeB, kB, coolB, cost, start, end, lev, rate_bar, liq_level, liq_fee):
+    """
+    Wie sim_joint, aber mit Hebel wie bei Binance-Margin: Käufe dürfen das freie Geld um bis zu (lev − 1) × Kapital
+    übersteigen (geliehenes USDC, negatives cash). Zinsen auf das Geliehene je 15m-Kerze (rate_bar). Zwangsliquidation,
+    sobald Vermögen / Schulden ≤ liq_level – geprüft mit den Tiefstkursen der Kerze (ungünstigster Fall); verkauft wird
+    dann alles zum Tief, mit Kosten und Liquidationsgebühr liq_fee. Kapital ≤ 0 = Totalverlust, danach kein Handel.
+    Rückgabe: Kapitalkurve, Anzahl Liquidationen, gezahlte Zinsen (Anteil des Startkapitals).
+    """
+    N, K = O.shape
+    eq = np.full(N, np.nan)
+    cash = 1.0
+    kind = np.full(K, -1, np.int64)
+    units = np.zeros(K)
+    entry = np.zeros(K)
+    stop = np.zeros(K)
+    tgt = np.zeros(K)
+    ebar = np.zeros(K, np.int64)
+    deadline = np.zeros(K, np.int64)
+    blocked = np.zeros(K, np.int64)
+    liqs = 0
+    interest = 0.0
+    dead = False
+    for i in range(start, end):
+        if dead:
+            eq[i] = 0.0
+            continue
+        if cash < 0.0:
+            charge = -cash * rate_bar
+            cash -= charge
+            interest += charge
+        # Liquidation ZUERST (ungünstigster Fall): Fallen alle offenen Positionen gleichzeitig auf ihr Kerzentief, kann
+        # Binance liquidieren, bevor der Bot seinen Stop ausführt.
+        if cash < 0.0:
+            assets_low = 0.0
+            for j in range(K):
+                if kind[j] >= 0:
+                    lo = L[i, j]
+                    p = lo if lo == lo else CF[i, j]
+                    assets_low += units[j] * p
+            if assets_low <= liq_level * (-cash):
+                for j in range(K):
+                    if kind[j] >= 0:
+                        lo = L[i, j]
+                        p = lo if lo == lo else CF[i, j]
+                        cash += units[j] * p * (1.0 - cost - liq_fee)
+                        kind[j] = -1
+                        units[j] = 0.0
+                liqs += 1
+                if cash <= 0.0:
+                    dead = True
+                    eq[i] = 0.0
+                    continue
+        # Ausstiege
+        for j in range(K):
+            if kind[j] < 0 or i < ebar[j]:
+                continue
+            lo = L[i, j]
+            first = i == ebar[j]
+            px = np.nan
+            reason = 0
+            if lo == lo:
+                if lo <= stop[j]:
+                    px = stop[j] if first else min(stop[j], O[i, j])
+                    reason = R_STOP
+                elif H[i, j] >= tgt[j]:
+                    px = tgt[j] if first else max(tgt[j], O[i, j])
+                    reason = R_TARGET
+            if px != px and i >= deadline[j] and CF[i, j] == CF[i, j]:
+                px = CF[i, j]
+                reason = R_TIME
+            if px == px:
+                cash += units[j] * px * (1.0 - cost)
+                if kind[j] == 1 and reason == R_STOP and coolB > 0:
+                    blocked[j] = i + coolB
+                kind[j] = -1
+                units[j] = 0.0
+        val = cash
+        nA = 0
+        nB = 0
+        for j in range(K):
+            if kind[j] >= 0:
+                c = CF[i, j]
+                val += units[j] * (c if c == c else entry[j])
+                if kind[j] == 0:
+                    nA += 1
+                else:
+                    nB += 1
+        if val <= 0.0:
+            dead = True
+            eq[i] = 0.0
+            continue
+        eq[i] = val
+        if i + 1 >= N:
+            continue
+        for rule in range(2):
+            for j in range(K):
+                if kind[j] >= 0:
+                    continue
+                ep = EP[i + 1, j]
+                if ep != ep:
+                    continue
+                room = cash + (lev - 1.0) * val           # freies Geld plus noch erlaubter Kredit
+                if rule == 0:
+                    if nA >= kA or not sigA[i, j]:
+                        continue
+                    sf = stopA[i, j]
+                    if not (sf > 0.0):
+                        continue
+                    budget = min(val * riskA / sf, val * capA, room)
+                    if budget < val * minA:
+                        continue
+                    tg = ep * (1.0 + tgtA[i, j])
+                    hold = holdA
+                else:
+                    if nB >= kB or not sigB[i, j] or i < blocked[j]:
+                        continue
+                    sf = stopB
+                    budget = min(val * sizeB, room)
+                    if budget < val * sizeB * 0.5:
+                        continue
+                    tg = np.inf
+                    hold = holdB
+                cash -= budget
+                kind[j] = rule
+                units[j] = budget * (1.0 - cost) / ep
+                entry[j] = ep
+                stop[j] = ep * (1.0 - sf)
+                tgt[j] = tg
+                ebar[j] = i + 1
+                deadline[j] = i + hold
+                if rule == 0:
+                    nA += 1
+                else:
+                    nB += 1
+    return eq, liqs, interest

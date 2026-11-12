@@ -183,9 +183,9 @@ Die Regeln bleiben. Neu sind drei Wächter, die prüfen, ob die Wirklichkeit noc
 ```bash
 python3 -m venv .venv-lab && .venv-lab/bin/pip install -r lab/requirements.txt
 bash research/download.sh /tmp/kurse                                   # 10 Coins, 15m/1h/1d, SHA-256-geprüft
-# 1m-Daten (≈ 800 MB): in research/download.sh "for i in 1h 15m 1d" durch "for i in 1m" ersetzen, dann
-#   python -I lab/load_1m.py /tmp/kurse/raw /tmp/kurse/cache1m
+bash research/download.sh /tmp/kurse 1m                                # zusätzlich 1m-Daten (≈ 800 MB)
 cd /tmp && /pfad/NewTry/.venv-lab/bin/python -I /pfad/NewTry/research/load.py /tmp/kurse/raw /tmp/kurse/cache
+/pfad/NewTry/.venv-lab/bin/python -I /pfad/NewTry/lab/load_1m.py /tmp/kurse/raw /tmp/kurse/cache1m
 python -I /pfad/NewTry/lab/research.py /tmp/kurse/cache /tmp/kurse/cache1m /tmp/lab-out     # Abschnitt 5 (≈ 3 Min.)
 python -I /pfad/NewTry/lab/portfolio.py /tmp/kurse/cache /tmp/kurse/cache1m /tmp/lab-out TREND4H CRASH TSMOM XSMOM CORE
 python -I /pfad/NewTry/lab/robust.py /tmp/kurse/cache /tmp/kurse/cache1m /tmp/lab-out \
