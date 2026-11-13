@@ -7,6 +7,8 @@ M2  Anlage mit autoSubscribe=false.  M3  Eigenes Earn-Guthaben des Nutzers bleib
 M4  Ausschalten holt das Geld zurück; im Notstopp wird nichts angelegt.  M5  Vor einem Verkauf keine Earn-Abfrage.
 G1  Zinszähler bleibt nach voller Rücknahme.  G2  Erster Monatsbericht zählt nur den gemessenen Zeitraum.
 G8  Verkaufsgebühr in der Basiswährung zählt als Kosten.
+Zweite Prüfung (13.11.2026): B1 gesenkte Notstopp-Grenze löst nicht selbst aus, B2 echte Flüsse während einer Umbuchung
+und Rückholung in der App, B3 Ein- und Auszahlungen im selben Verhältnis, verspätete Gutschrift (> 30 Minuten).
 """
 import ccxt
 import pytest
@@ -135,9 +137,9 @@ def test_withdrawal_during_a_drawdown_keeps_the_drawdown_percentage(tmp_path):
     assert telegram.any("Auszahlung erkannt: −400,00 USDC")
     assert not bot.st["halted"]
     assert bot.st["peak_equity"] == pytest.approx(500.0)    # Höchststand halbiert: weiter 20 % Rückgang
-    exchange.balances["USDC"] += 100.0                      # Einzahlung danach: Höchststand + Betrag
+    exchange.balances["USDC"] += 100.0                      # Einzahlung danach: Höchststand im selben Verhältnis
     refresh_minute(bot, clock)
-    assert bot.st["peak_equity"] == pytest.approx(600.0)
+    assert bot.st["peak_equity"] == pytest.approx(625.0)    # 500 × 500/400: weiter 20 % Rückgang
 
 
 # ---------------------------------------------------------------- M1: Abstand zwischen Rücknahmen
@@ -370,3 +372,125 @@ def test_simple_earn_outage_creates_no_flows(tmp_path):
     refresh_minute(bot, clock)
     assert not flows(telegram)
     assert "ETH/USDC" in bot.st["positions"]
+
+
+# ---------------------------------------------------------------- Zweite Prüfung (B1–B3)
+
+class HoldEarn(FakeExchange):
+    """Rücknahme: Position sinkt sofort, die Gutschrift im Spot-Konto kommt erst bei release()."""
+    hold = False
+
+    def sapi_post_simple_earn_flexible_redeem(self, params):
+        if not self.hold:
+            return super().sapi_post_simple_earn_flexible_redeem(params)
+        asset = str(params["productId"])[:-3]
+        amount = min(self.earn.get(asset, 0.0), float(params["amount"]))
+        self.earn[asset] -= amount
+        self.held = getattr(self, "held", []) + [(asset, amount)]
+        return {"redeemId": 1, "success": True}
+
+    def release(self):
+        for asset, amount in getattr(self, "held", []):
+            self.balances[asset] = self.balances.get(asset, 0.0) + amount
+        self.held = []
+
+
+def held_bot(tmp_path, cls=HoldEarn, **overrides):
+    exchange = dip_exchange(cls, 1000.0, {})
+    clock = Clock(SIGNAL_CLOSE_MS - 3_600_000)
+    overrides.setdefault("earn_redeem_wait_s", 4.0)
+    bot, telegram = make_bot(tmp_path, exchange, clock, earn_enabled=True, earn_reserve=60.0, **overrides)
+    bot.startup()
+    refresh_minute(bot, clock)                               # legt 940 an
+    return bot, telegram, clock, exchange
+
+
+def test_withdrawal_while_a_redemption_is_in_transit_is_booked_once(tmp_path):
+    bot, telegram, clock, exchange = held_bot(tmp_path)
+    exchange.hold = True
+    bot.ensure_cash(500.0)
+    assert bot.st["earn"]["transit"]
+    exchange.balances["USDC"] -= 50.0                       # Nutzer gibt 50 USDC aus
+    refresh_minute(bot, clock)
+    exchange.release()                                       # Rücknahme kommt an
+    for _ in range(3):
+        refresh_minute(bot, clock)
+    assert [t.split(".")[0] for t in flows(telegram)] == ["💸 Auszahlung erkannt: −50,00 USDC"]
+    assert bot.equity == pytest.approx(950.0, abs=0.01)
+    assert bot.st["earn"]["transit"] is None
+
+
+def test_late_credit_after_half_an_hour_is_still_no_flow(tmp_path):
+    bot, telegram, clock, exchange = held_bot(tmp_path, max_drawdown_pct=30.0)
+    bot.st["peak_equity"] = 1250.0                           # echter Rückgang 20 %
+    exchange.hold = True
+    bot.ensure_cash(500.0)
+    for _ in range(35):                                      # Gutschrift erst nach 35 Minuten
+        refresh_minute(bot, clock)
+    exchange.release()
+    refresh_minute(bot, clock)
+    refresh_minute(bot, clock)
+    assert not flows(telegram) and not bot.st["halted"]
+    assert 1 - bot.equity / bot.st["peak_equity"] == pytest.approx(0.20, abs=0.002)
+
+
+def test_bots_earn_money_redeemed_in_the_app_is_no_deposit(tmp_path):
+    bot, telegram, clock, exchange = held_bot(tmp_path, cls=FakeExchange)
+    exchange.balances["USDC"] += exchange.earn.pop("USDC")  # Nutzer holt alles in der App ins Spot-Konto
+    refresh_minute(bot, clock)
+    assert not flows(telegram)
+    assert bot.equity == pytest.approx(1000.0, abs=0.01)
+    assert bot.earn_amount == pytest.approx(exchange.earn.get("USDC", 0.0))   # Hauptbuch = was jetzt (wieder) angelegt ist
+
+
+def test_users_own_earn_money_redeemed_in_the_app_is_a_deposit(tmp_path):
+    bot, telegram, clock, exchange = held_bot(tmp_path, cls=FakeExchange)
+    exchange.earn["USDC"] += 300.0                           # eigenes Earn-Guthaben des Nutzers …
+    refresh_minute(bot, clock)
+    exchange.earn["USDC"] -= 300.0                           # … holt er in der App ins Spot-Konto
+    exchange.balances["USDC"] += 300.0
+    refresh_minute(bot, clock)
+    assert telegram.any("Einzahlung erkannt: +300,00 USDC")
+    assert bot.equity == pytest.approx(1300.0, abs=0.01)                     # die 300 sind jetzt Bot-Kapital
+
+
+def test_deposit_and_withdrawal_round_trip_keeps_the_drawdown(tmp_path):
+    exchange = market(signals=(), usdc=800.0)
+    bot, telegram, clock = started(tmp_path, exchange, max_drawdown_pct=30.0)
+    bot.st["peak_equity"] = 1000.0                          # 20 % Rückgang
+    refresh_minute(bot, clock)
+    exchange.balances["USDC"] += 400.0
+    refresh_minute(bot, clock)
+    exchange.balances["USDC"] -= 400.0
+    refresh_minute(bot, clock)
+    assert 1 - bot.equity / bot.st["peak_equity"] == pytest.approx(0.20, abs=1e-6)
+
+
+def test_lowering_the_drawdown_limit_does_not_itself_trigger_the_stop(tmp_path):
+    exchange = market(signals=(), usdc=650.0)
+    bot, telegram, clock = started(tmp_path, exchange, max_drawdown_pct=40.0)
+    bot.st["peak_equity"] = 1000.0                           # 35 % unter dem Höchststand
+    refresh_minute(bot, clock)
+    bot.store.save()
+    bot2, telegram2 = make_bot(tmp_path, exchange, clock, max_drawdown_pct=30.0)
+    bot2.startup()
+    refresh_minute(bot2, clock)
+    assert not bot2.st["halted"]
+    assert telegram2.any("gilt noch die alte Grenze von −40 %")
+    exchange.balances["USDC"] = 560.0                        # Kursverlust: 44 % unter dem Höchststand …
+    bot2.st["last_quote_balance"] = 560.0                    # (als Verlust, nicht als Auszahlung)
+    refresh_minute(bot2, clock)
+    assert bot2.st["halted"]                                 # … jetzt greift die alte Grenze von 40 %
+
+
+def test_lowered_limit_takes_effect_once_back_inside(tmp_path):
+    exchange = market(signals=(), usdc=650.0)
+    bot, telegram, clock = started(tmp_path, exchange, max_drawdown_pct=40.0)
+    bot.st["peak_equity"] = 1000.0
+    refresh_minute(bot, clock)
+    bot.store.save()
+    bot2, telegram2 = make_bot(tmp_path, exchange, clock, max_drawdown_pct=30.0)
+    bot2.startup()
+    bot2.st["last_quote_balance"] = exchange.balances["USDC"] = 750.0   # Erholung auf 25 % Rückgang
+    refresh_minute(bot2, clock)
+    assert bot2.st["dd_limit_carry"] is None and bot2.drawdown_limit() == pytest.approx(30.0)

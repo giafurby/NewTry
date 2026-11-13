@@ -1,7 +1,7 @@
 # Überblick: Was läuft, was kostet es, wie arbeitet der Bot?
 
-Stand: 12.11.2026 (Version v3.1). Für alle, die den Bot bedienen, ohne den Code zu lesen. Jede Aussage hier wurde von
-einem unabhängigen Prüfagenten gegen den Code beider Projekte geprüft.
+Stand: 13.11.2026 (Version v3.1). Für alle, die den Bot bedienen, ohne den Code zu lesen. Ein unabhängiger Prüfagent hat
+die Aussagen in zwei Durchgängen gegen den Code beider Projekte geprüft (12. und 13.11.2026).
 
 ## In einem Satz
 
@@ -72,10 +72,12 @@ insgesamt. Berichte: `lab/ERGEBNISSE_V2.md` und `lab/ERGEBNISSE_V2B.md`.
 * **Notbremse an der Börse:** nach jedem Kauf eine Stop-Order direkt bei Binance. Sie verkauft auch, wenn Bot oder Server
   ausfallen – sofern der Kurs nicht mehr als 3 % unter den Auslöser springt (Stop-Limit-Order mit Mindestpreis).
 * **Notstopp:** fällt das Kapital 30 % unter den Höchststand, verkauft der Bot alles und hält an; `/weiter` erst nach 24
-  Stunden. In älteren `.env` steht noch 40 (oder 25) – das Update stellt beides von selbst auf 30.
-* **Ein- und Auszahlungen** zählen nie als Gewinn oder Verlust. Bei einer Auszahlung sinkt der Höchststand im selben
-  Verhältnis wie das Kapital; der Rückgang in Prozent bleibt gleich, eine Auszahlung löst also nie den Notstopp aus.
-  (Bis v3 konnte eine Auszahlung während eines Rückgangs den Notstopp auslösen – behoben in v3.1.)
+  Stunden. In älteren `.env` steht noch 40 oder 25. Aus 25 macht das Update 30; aus 40 nur, wenn dein Kapital gerade
+  weniger als 20 % unter dem Höchststand liegt – sonst bleibt 40, und das Update zeigt, wie du später umstellst. Wird die
+  Grenze gesenkt, während der Rückgang schon darüber liegt, gilt die alte weiter, bis er darunter fällt.
+* **Ein- und Auszahlungen** zählen nie als Gewinn oder Verlust. Der Höchststand ändert sich bei jeder Ein- und
+  Auszahlung im selben Verhältnis wie das Kapital; der Rückgang in Prozent bleibt gleich. Eine Auszahlung löst also nie
+  den Notstopp aus. (Bis v3 konnte eine Auszahlung während eines Rückgangs den Notstopp auslösen – behoben in v3.1.)
 * **Fremde Bestände:** Coins, die du selbst kaufst, rechnet der Bot nicht zu seinem Kapital und verkauft sie nie. Aber:
   Jedes USDC im Spot-Konto zählt als sein Kapital (gibst du USDC für einen eigenen Coin-Kauf aus, ist das für ihn eine
   Auszahlung), und BNB wird für Gebühren verbraucht. Mit Simple Earn rechnet er nur, was **er** dort angelegt hat.

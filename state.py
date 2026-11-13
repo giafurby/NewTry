@@ -48,6 +48,8 @@ DEFAULTS: dict[str, Any] = {
              "transit": None, "short_since": None, "last_action": ""},
     "earn_rewards_seen": 0.0,   # (bis v3; nicht mehr benutzt)
     "halted_at": None,          # Zeit (ms) des letzten Notstopps (Wartezeit vor /weiter)
+    "dd_limit_pct": None,       # Notstopp-Grenze beim letzten Start (erkennt eine gesenkte Grenze)
+    "dd_limit_carry": None,     # alte, höhere Grenze, die gilt, bis der Rückgang unter die neue fällt
     "month": None,              # Monat des letzten Monatsberichts ("2026-11")
     "month_start": None,        # Kapital, Einzahlungen, Gebühren, Zinsen zu Monatsbeginn (für den Monatsbericht)
     "decisions": [],            # die letzten Entscheidungen (für /warum): {"at", "text"}

@@ -42,7 +42,7 @@ CASH_BUFFER = 0.98           # höchstens 98 % des freien Guthabens in eine Orde
 MAX_RISK_FRACTION = 0.03     # die Mindest-Ordergröße nur nutzen, wenn der Trade dann höchstens 3 % riskiert
 SELFTEST_COINS = ("ETH", "BTC", "SOL", "XRP", "BNB")
 EARN_PACE_SECONDS = 3.1      # Binance: höchstens ein Earn-Auftrag (Anlage/Rücknahme) je 3 Sekunden und Konto
-EARN_TRANSIT_MAX_MS = 30 * 60_000   # so lange darf eine Rücknahme/Anlage „unterwegs“ sein, dann gilt, was Binance zeigt
+EARN_TRANSIT_MAX_MS = 6 * 3_600_000  # so lange darf eine Rücknahme/Anlage „unterwegs“ sein, dann gilt, was Binance zeigt
 EARN_SHORT_MS = 10 * 60_000  # zeigt Binance so lange weniger Earn-Guthaben als gebucht, gilt der Wert von Binance
 EARN_RETRY_MS = 15 * 60_000  # Zurückholen nach dem Ausschalten: nach einem Fehler erst so viel später neu versuchen
 STOP_REASONS = ("Stop", "Notbremse an der Börse")
@@ -125,6 +125,7 @@ class Bot:
         self.confirm_until = 0.0
         self.gone_counts: dict[str, int] = {}
         self.last_earn_call = -1e12          # Zeit des letzten Earn-Auftrags (Abstand für Binance)
+        self.earn_moved = 0.0                # bei dieser Abfrage: Earn-Guthaben des Bots, das jemand in der App ins Spot holte
 
     # ------------------------------------------------------------------ Zeit
 
@@ -177,6 +178,7 @@ class Bot:
         if st["last_report_day"] is None:
             st["last_report_day"] = self.local().date().isoformat()
         self.roll_day()
+        self.adopt_drawdown_limit()
         self.store.save()
         self.tg.prepare(COMMANDS)
         self.tg.send(self.start_message())
@@ -331,6 +333,7 @@ class Bot:
         balances = self.broker.balances()
         self.balances = balances
         self.quote_free = balances.free(self.q)
+        self.earn_moved = 0.0
         interest = self.refresh_earn() if with_earn else 0.0
         spot = balances.total(self.q)
         self.quote_total = spot + self.earn_amount + self.earn_transit(spot)
@@ -344,6 +347,13 @@ class Bot:
         last = self.st.get("last_quote_balance")
         if not after_trade and last is not None:
             flow = self.quote_total - float(last) - interest          # Zinsen sind Ertrag, kein Kapitalfluss
+            moved = min(flow, self.earn_moved, self.earn_amount) if flow > 0 else 0.0
+            if moved > 0:                         # in der App aus Earn ins Spot-Konto geholt: Umbuchung, keine Einzahlung
+                self.st["earn"]["amount"] = self.earn_amount - moved
+                self.quote_total -= moved
+                self.recompute_equity()
+                flow -= moved
+                self.note(f"Earn → Spot in der App: {de(moved)} {self.q} (Umbuchung, keine Einzahlung)")
             if abs(flow) >= max(1.0, 0.005 * max(self.equity, 1.0)):
                 if any(p.get("stop_order_id") for p in positions.values()) and self.check_exchange_stops():
                     return                       # das Geld kam von einer Notbremse – schon als Verkauf gebucht
@@ -381,9 +391,16 @@ class Bot:
         earn["apr"] = pos.apr
         if pos.product_id:
             earn["product"] = pos.product_id
+        seen = earn.get("rewards_seen")
+        new_rewards = max(0.0, pos.rewards_total - float(seen)) if seen is not None else 0.0
+        read = earn.get("read")
+        if read is not None:                     # erwartet: letzte Lesung + eigene Aufträge seitdem + neue Zinsen
+            dropped = float(read) + float(earn.get("own_net") or 0.0) + new_rewards - pos.amount
+            if dropped > max(0.05, 0.002 * float(read)):
+                self.earn_moved = min(dropped, max(0.0, self.earn_amount - pos.amount))
+        earn["read"], earn["own_net"] = pos.amount, 0.0
         earn["position"] = pos.amount
         credited = 0.0
-        seen = earn.get("rewards_seen")
         if seen is not None and pos.rewards_total > float(seen):
             new = pos.rewards_total - float(seen)
             base = pos.amount - new                                 # Position vor diesen Zinsen
@@ -429,7 +446,7 @@ class Bot:
             elif amount < 0 and float(position) <= float(before) + tolerance:
                 earn["amount"] = max(0.0, self.earn_amount + amount)   # … oder die Anlage nicht
         self.alert("earn-transit", f"⚠️ Earn: Die {'Rücknahme' if amount > 0 else 'Anlage'} von {de(abs(amount))} "
-                                   f"{self.q} zeigt das Spot-Konto auch nach {EARN_TRANSIT_MAX_MS // 60_000} Minuten "
+                                   f"{self.q} zeigt das Spot-Konto auch nach {EARN_TRANSIT_MAX_MS // 3_600_000} Stunden "
                                    "nicht. Ab jetzt gilt, was Binance zeigt – bitte in der App unter Earn nachsehen.")
         return 0.0
 
@@ -497,6 +514,7 @@ class Bot:
         earn["transit"] = {"amount": -amount, "spot_expected": spot_before - amount, "at": self.now_ms(),
                            "position_before": earn.get("position")}
         earn["position"] = float(earn.get("position") or 0.0) + amount     # bis Binance den neuen Stand zeigt
+        earn["own_net"] = float(earn.get("own_net") or 0.0) + amount
         earn["last_action"] = f"angelegt {de(amount)} {self.q} {self.local():%d.%m. %H:%M}"
         self.settle_spot()
         self.store.save()
@@ -528,6 +546,7 @@ class Bot:
         earn["transit"] = {"amount": amount, "spot_expected": spot_before + amount, "at": self.now_ms(),
                            "position_before": position}
         earn["position"] = max(0.0, float(position or 0.0) - amount)
+        earn["own_net"] = float(earn.get("own_net") or 0.0) - amount
         earn["last_action"] = f"zurückgeholt {de(amount)} {self.q} {self.local():%d.%m. %H:%M} (Earn aus)"
         self.settle_spot()
         self.store.save()
@@ -561,6 +580,7 @@ class Bot:
         earn["transit"] = {"amount": amount, "spot_expected": spot_before + amount, "at": self.now_ms(),
                            "position_before": position}
         earn["position"] = max(0.0, float(position or 0.0) - amount)
+        earn["own_net"] = float(earn.get("own_net") or 0.0) - amount
         earn["last_action"] = f"zurückgeholt {de(amount)} {self.q} {self.local():%d.%m. %H:%M}"
         deadline = self.clock() + self.s.earn_redeem_wait_s
         while True:
@@ -575,15 +595,16 @@ class Bot:
                          "der Betrag zählt bis zur Gutschrift weiter zum Kapital.")
 
     def record_flow(self, flow: float) -> None:
-        """Ein- oder Auszahlung buchen – zählt nie als Gewinn oder Verlust. Einzahlung: Höchststand und Tagesbeginn steigen
-        um den Betrag. Auszahlung: Beide sinken im selben Verhältnis wie das Kapital. Der Rückgang in Prozent bleibt
-        gleich – eine Auszahlung kann den Notstopp also nie auslösen."""
+        """Ein- oder Auszahlung buchen – zählt nie als Gewinn oder Verlust. Höchststand und Tagesbeginn ändern sich im
+        selben Verhältnis wie das Kapital: Der Rückgang in Prozent bleibt bei jeder Ein- und Auszahlung gleich. Eine
+        Auszahlung kann den Notstopp also nie auslösen, und Hin und Her schwächt ihn nie ab."""
         st = self.st
         before = self.equity - flow
-        shrink = max(0.0, self.equity) / before if flow < 0 and before > 0 else None
+        factor = max(0.0, self.equity) / before if before > 0 else None
         for key in ("peak_equity", "day_start_equity"):
             if st.get(key) is not None:
-                st[key] = float(st[key]) * shrink if shrink is not None else max(0.0, float(st[key]) + flow)
+                st[key] = float(st[key]) * factor if factor is not None else max(0.0, self.equity)
+        self.shift_transit(flow)                  # eine echte Ein-/Auszahlung verschiebt auch den erwarteten Spot-Stand
         st["net_deposits"] = float(st.get("net_deposits") or 0.0) + flow
         label = "💶 Einzahlung" if flow > 0 else "💸 Auszahlung"
         self.tg.send(f"{label} erkannt: {signed(flow)} {self.q}. Zählt nicht als Gewinn oder Verlust." + (
@@ -598,13 +619,41 @@ class Bot:
             self.st["day_start_equity"] = self.equity
             self.st["day_limit_hit"] = False
 
+    def drawdown_limit(self) -> float:
+        """Wirksame Notstopp-Grenze in %: MAX_DRAWDOWN_PCT – außer eine gesenkte Grenze wartet noch (adopt_drawdown_limit)."""
+        carry = self.st.get("dd_limit_carry")
+        return float(carry) if carry else self.s.max_drawdown_pct
+
+    def adopt_drawdown_limit(self) -> None:
+        """Beim Start: Wurde MAX_DRAWDOWN_PCT gesenkt, während der Rückgang schon darüber liegt, verkauft der Bot NICHT
+        sofort alles – das wäre eine Folge der Einstellung, nicht des Marktes. Die alte Grenze gilt weiter, bis der
+        Rückgang unter die neue fällt; danach gilt die neue."""
+        st, s = self.st, self.s
+        before = st.get("dd_limit_pct")
+        peak = float(st.get("peak_equity") or 0.0)
+        dd = (1 - self.equity / peak) * 100 if peak > 0 else 0.0
+        carry = float(st.get("dd_limit_carry") or 0.0)
+        if carry and s.max_drawdown_pct >= carry:
+            st["dd_limit_carry"] = None               # Grenze wieder gelockert: nichts mehr zu überbrücken
+        elif (before is not None and s.max_drawdown_pct < float(before) and dd >= s.max_drawdown_pct
+              and not st["halted"]):
+            st["dd_limit_carry"] = max(float(before), carry)
+            self.tg.send(f"ℹ️ Notstopp-Grenze gesenkt auf −{de(s.max_drawdown_pct, 0)} %. Dein Kapital liegt gerade "
+                         f"{de(dd, 1)} % unter dem Höchststand. Bis es wieder weniger als {de(s.max_drawdown_pct, 0)} % "
+                         f"sind, gilt noch die alte Grenze von −{de(float(st['dd_limit_carry']), 0)} % – die Umstellung "
+                         "selbst löst also keinen Notverkauf aus.")
+        st["dd_limit_pct"] = s.max_drawdown_pct
+
     def check_limits(self) -> None:
         st, s = self.st, self.s
         self.roll_day()
         st["peak_equity"] = max(float(st["peak_equity"] or 0.0), self.equity)
-        floor = st["peak_equity"] * (1 - s.max_drawdown_pct / 100)
+        if st.get("dd_limit_carry") and self.equity >= st["peak_equity"] * (1 - s.max_drawdown_pct / 100):
+            st["dd_limit_carry"] = None               # wieder innerhalb der neuen Grenze: ab jetzt gilt sie
+        limit = self.drawdown_limit()
+        floor = st["peak_equity"] * (1 - limit / 100)
         if not st["halted"] and self.equity < floor:
-            self.emergency_stop(f"Kapital {de(self.equity)} {self.q} liegt mehr als {de(s.max_drawdown_pct, 0)} % "
+            self.emergency_stop(f"Kapital {de(self.equity)} {self.q} liegt mehr als {de(limit, 0)} % "
                                 f"unter dem Höchststand {de(st['peak_equity'])} {self.q}")
             return
         day_floor = float(st["day_start_equity"] or self.equity) * (1 - s.daily_loss_limit_pct / 100)
@@ -1409,8 +1458,9 @@ class Bot:
             + f" · Höchststand {de(peak)} {self.q}",
             f"Heute: {signed(self.equity - day_start)} {self.q}"
             + (f" · Tageslimit −{de(s.daily_loss_limit_pct, 0)} %" if s.daily_loss_limit_pct > 0 else ""),
-            f"Notstopp unter {de(peak * (1 - s.max_drawdown_pct / 100))} {self.q} (−{de(s.max_drawdown_pct, 0)} % "
-            "vom Höchststand)",
+            f"Notstopp unter {de(peak * (1 - self.drawdown_limit() / 100))} {self.q} (−{de(self.drawdown_limit(), 0)} % "
+            "vom Höchststand" + (f"; −{de(s.max_drawdown_pct, 0)} % gilt, sobald der Rückgang darunter liegt"
+                                 if st.get("dd_limit_carry") else "") + ")",
         ]
         positions = st["positions"]
         lines.append(f"Positionen ({len(positions)}):" if positions else "Keine offenen Positionen.")
