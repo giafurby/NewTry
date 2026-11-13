@@ -156,9 +156,39 @@ if [[ "$first_install" == 0 ]]; then
     set_env DIP_DROP_PCT 9
     ok "Crash-Kauf schon ab −9 % statt −10 % (im Rückblick mehr Trades und mehr Gewinn bei gleichem Risiko)."
   fi
-  if [[ "$(env_value "$APP/.env" MAX_DRAWDOWN_PCT)" == "25" ]]; then
-    set_env MAX_DRAWDOWN_PCT 40
-    ok "Notstopp von −25 % auf −40 % gesetzt (der größte Rückgang im Rückblick lag bei 26 %)."
+  old_dd="$(env_value "$APP/.env" MAX_DRAWDOWN_PCT)"
+  if [[ "$old_dd" == "25" ]]; then                              # früherer Standard, lockern ist immer sicher
+    set_env MAX_DRAWDOWN_PCT 30
+    ok "Notstopp von −25 % auf −30 % gesetzt (größter Rückgang im Rückblick 26–28 %; danach 24 h Wartezeit)."
+  elif [[ "$old_dd" == "40" ]]; then
+    # Senken nur, wenn das Kapital klar innerhalb der neuen Grenze liegt – sonst würde das Update selbst den Notstopp
+    # auslösen. Rückgang aus dem Gedächtnis des Bots (Positionen zum Kaufkurs bewertet, daher großer Abstand: 20 %).
+    mode_now="$(env_value "$APP/.env" MODE)"
+    dd_now="$(python3 - "$APP/data/state-${mode_now:-paper}.json" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    st = json.load(open(sys.argv[1], encoding="utf-8"))
+    peak = float(st.get("peak_equity") or 0)
+    equity = float(st.get("last_quote_balance") or 0) + sum(
+        float(p.get("amount") or 0) * float(p.get("entry_price") or 0) for p in (st.get("positions") or {}).values())
+    if peak > 0 and equity > 0:
+        print(f"{max(0.0, (1 - equity / peak) * 100):.1f}")
+except Exception:
+    pass
+PY
+)"
+    if [[ -n "$dd_now" ]] && python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) < 20 else 1)' "$dd_now"; then
+      set_env MAX_DRAWDOWN_PCT 30
+      ok "Notstopp von −40 % auf −30 % gesetzt (dein Kapital liegt gerade etwa ${dd_now/./,} % unter dem Höchststand; danach 24 h Wartezeit)."
+    else
+      if [[ -n "$dd_now" ]]; then
+        warn "Notstopp bleibt bei −40 %: Dein Kapital liegt gerade etwa ${dd_now/./,} % unter dem Höchststand – zu nah an 30 %."
+      else
+        warn "Notstopp bleibt bei −40 %: Der Abstand zum Höchststand ist gerade nicht lesbar."
+      fi
+      warn "  Empfohlen sind 30 %. Umstellen, sobald /status weniger als 20 % Abstand zeigt:"
+      warn "  sed -i 's/^MAX_DRAWDOWN_PCT=.*/MAX_DRAWDOWN_PCT=30/' $APP/.env && systemctl restart newtry-bot"
+    fi
   fi
 fi
 quote="$(env_value "$APP/.env" QUOTE)"
@@ -171,7 +201,7 @@ if [[ -z "$WANT_MODE" && "$first_install" == 1 ]]; then
   ${Y}Mit ECHTGELD handeln?${N}
   * Der Bot kauft und verkauft dann mit dem ${quote}-Guthaben auf deinem Binance-Konto.
   * Trend: 1 % Risiko je Trade, höchstens 3 Positionen. Crash-Kauf: 20 % je Kauf, höchstens 3, Notstop −15 %.
-  * Notstopp für alles bei −40 % vom Höchststand (im Rückblick lag der größte Rückgang bei 26 %).
+  * Notstopp für alles bei −30 % vom Höchststand, danach 24 Stunden Pause (größter Rückgang im Rückblick: 26–28 %).
   * Beim ersten Start macht er einen Funktionstest: Kauf und sofortiger Verkauf für ca. 7 ${quote}.
   * Gewinne sind NICHT garantiert. Setze nur Geld ein, dessen Verlust du verkraften kannst.
 

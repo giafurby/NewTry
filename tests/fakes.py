@@ -119,7 +119,7 @@ def make_settings(tmp_path: Path, **overrides: Any) -> Settings:
         dip_enabled=False, dip_coins=("ETH", "BTC", "SOL", "XRP"), dip_drop_pct=10.0, dip_position_pct=20.0,
         dip_max_positions=5, dip_stop_pct=15.0, dip_hold_hours=4.0, dip_cooldown_hours=24.0,
         exchange_stop=False, exchange_stop_buffer_pct=1.0, exchange_stop_gap_pct=3.0,
-        earn_enabled=False, earn_reserve=60.0, earn_redeem_wait_s=20.0, halt_wait_hours=24.0,
+        earn_enabled=False, earn_reserve=60.0, earn_reserve_pct=0.0, earn_redeem_wait_s=20.0, halt_wait_hours=24.0,
     )
     return dataclasses.replace(base, **overrides)
 
@@ -128,7 +128,7 @@ def make_bot(tmp_path: Path, exchange: FakeExchange, clock: Clock, **overrides: 
     settings = make_settings(tmp_path, **overrides)
     telegram = FakeTelegram()
     bot = Bot(settings, Broker(exchange, settings.quote, sleep=lambda _s: None), telegram,
-              StateStore(settings.data_dir / "state.json"), clock=clock)
+              StateStore(settings.data_dir / "state.json"), clock=clock, sleep=clock.advance)   # Warten = Uhr vorstellen
     return bot, telegram
 
 

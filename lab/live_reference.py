@@ -6,7 +6,9 @@ Referenzwerte für die Live-Wächter des Bots (Schritt 8) – aus derselben Simu
   2. Vorwärtstest: Verteilung des Durchschnitts von 20 bzw. 30 aufeinanderfolgenden Trades je Regel (Block-Bootstrap über
      die Trade-Reihe 2018–2026). Liegt der Live-Durchschnitt unter dem 5-%-Quantil, passt der Markt nicht mehr zur Regel.
   3. Risikostufen: Rendite und Rückgang bei anderem Trend-Risiko und anderer Crash-Größe (nur zur Einordnung).
-Aufruf: python -I lab/live_reference.py <cache15> <cache1m> [--cash]   (--cash: nur der investierte Anteil der Kombi)
+Aufruf: python -I lab/live_reference.py <cache15> <cache1m> [--cash | --erwartung]
+  --cash       nur der investierte Anteil der Kombi
+  --erwartung  die Werte für /erwartung (guards.EXPECTATION_30D)
 """
 from __future__ import annotations
 
@@ -60,10 +62,6 @@ def main():
               f"schlechtester Monat {a['worst_month']:+.0%} | seit 2025: {b['cagr']:+.1%}/Jahr, Rückgang {b['maxdd']:.0%}")
 
 
-if __name__ == "__main__" and "--cash" not in sys.argv:
-    main()
-
-
 def idle_cash(cache15, cache1m):
     """Teil E der Gemini-Recherche: Wie viel Kapital ist im Mittel investiert (Rest liegt als USDC herum)?"""
     m = load_market(cache15, cache1m)
@@ -78,5 +76,32 @@ def idle_cash(cache15, cache1m):
         print(f"Kombi {label}: im Mittel {e.mean():.0%} investiert, {np.mean(e < 0.05):.0%} der Zeit (fast) ganz in USDC")
 
 
-if __name__ == "__main__" and len(sys.argv) > 3 and sys.argv[3] == "--cash":
-    idle_cash(sys.argv[1], sys.argv[2])
+def expectation(cache15, cache1m):
+    """Werte für /erwartung (guards.EXPECTATION_30D): Rendite über 30 Tage aus Tagesschlüssen (überlappende Fenster) und
+    größter Rückgang innerhalb von 30 Tagen auf 15m-Basis – so misst auch der Notstopp des Bots (jede Minute)."""
+    m = load_market(cache15, cache1m)
+    ctx = F.Ctx(m)
+    s18, s20, s25 = m.index_of("2018-01-01"), m.index_of("2020-01-01"), m.index_of("2025-01-01")
+    eq, _ = F.run_kombi(ctx, F.KOMBI_NEWTRY, COST, s18, m.N)
+    for label, start in (("2020-2026", s20), ("2025-2026", s25)):
+        d = stats.daily(eq, m.T, start, m.N).to_numpy()
+        rets = np.array([d[i + 30] / d[i] - 1 for i in range(len(d) - 30)]) * 100
+        seg = eq[start:m.N]
+        seg = seg[np.isfinite(seg)]
+        win = 30 * 96
+        dds = np.array([(1 - w / np.maximum.accumulate(w)).max()
+                        for w in (seg[i:i + win] for i in range(0, len(seg) - win, 96))]) * 100
+        q = np.percentile(rets, [5, 25, 50, 75, 95])
+        print(f'    "{label}": {{"p05": {q[0]:.1f}, "p25": {q[1]:.1f}, "p50": {q[2]:.1f}, "p75": {q[3]:.1f}, '
+              f'"p95": {q[4]:.1f}, "p_positive": {np.mean(rets > 0):.2f},\n'
+              f'                  "dd_median": {np.median(dds):.1f}, "dd_p90": {np.percentile(dds, 90):.1f}, '
+              f'"dd_max": {dds.max():.1f}}},')
+
+
+if __name__ == "__main__":
+    if "--cash" in sys.argv:
+        idle_cash(sys.argv[1], sys.argv[2])
+    elif "--erwartung" in sys.argv:
+        expectation(sys.argv[1], sys.argv[2])
+    else:
+        main()

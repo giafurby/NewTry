@@ -6,6 +6,8 @@ Wie die Regeln ausgewählt wurden (640 Daytrading-Varianten, Trend, Momentum, H�
 **[research/ERGEBNISSE.md](research/ERGEBNISSE.md)**. Die zweite Forschungsrunde hat beide Projekte zusammengeführt und
 alle Kandidaten (515 Varianten, neue Strategiefamilien, die Gemini-Vorschläge) unter identischen, realistischen
 Bedingungen verglichen: **[lab/ERGEBNISSE_V2.md](lab/ERGEBNISSE_V2.md)**. Ergebnis: Diese beiden Regeln bleiben.
+Hebel und Copy-Trading-Ranglisten: **[lab/ERGEBNISSE_V3.md](lab/ERGEBNISSE_V3.md)**. Was auf dem Server läuft, welche
+Verbindungen es gibt und was es kostet: **[UEBERBLICK.md](UEBERBLICK.md)**.
 
 ## Was er macht
 
@@ -27,17 +29,17 @@ keine API-Kosten, keine erfundenen Antworten, jede Entscheidung nachrechenbar.
 
 | Grenze | Standard | Wirkung |
 |---|---|---|
-| **Notbremse bei Binance** | nach jedem Kauf | eine Stop-Order liegt **direkt an der Börse**, 1 % unter dem Stop des Bots. Sie verkauft auch dann, wenn Bot, Server oder Internet ausfallen. Läuft der Bot, verkauft er selbst zuerst und storniert sie vorher. |
+| **Notbremse bei Binance** | nach jedem Kauf | eine Stop-Order liegt **direkt an der Börse**, 1 % unter dem Stop des Bots. Sie verkauft auch dann, wenn Bot, Server oder Internet ausfallen – sofern der Kurs nicht mehr als 3 % unter den Auslöser springt (es ist eine Stop-Limit-Order mit Mindestpreis). Läuft der Bot, verkauft er selbst zuerst und storniert sie vorher. |
 | **Wächter** | alle 5 Minuten | meldet per Telegram, wenn der Bot nicht läuft, hängt oder die Festplatte voll ist, und startet ihn neu (höchstens einmal pro Stunde) |
-| Notstopp | −30 % vom Höchststand | **alles verkaufen und anhalten**; `/weiter` erst nach 24 Stunden Wartezeit, damit der Neustart eine Entscheidung ist und keine Reaktion (der größte Rückgang im Rückblick: 26–28 %) |
-| Zinsen auf Cash | aus (`EARN_ENABLED`) | der Bot ist im Mittel nur zu etwa 27 % investiert. Eingeschaltet legt er freies USDC über einer **Reserve von 60 USDC** in Binance Simple Earn Flexible an (3–9 % im Jahr, schwankend) und holt es vor jedem Kauf zurück. Dauert die Rücknahme länger als 20 Sekunden, kauft er mit der Reserve. Zinsen zählen nicht als Einzahlung. Risiken: verzögerte Rücknahme bei extremer Marktlage, Gegenpartei Binance. |
+| Notstopp | −30 % vom Höchststand | **alles verkaufen und anhalten**; `/weiter` erst nach 24 Stunden Wartezeit, damit der Neustart eine Entscheidung ist und keine Reaktion (der größte Rückgang im Rückblick: 26–28 %). Wird die Grenze gesenkt, während der Rückgang schon darüber liegt, gilt die alte weiter, bis er darunter fällt – die Umstellung selbst löst nie einen Notverkauf aus. |
+| Zinsen auf Cash | aus (`EARN_ENABLED`) | der Bot ist im Mittel nur zu etwa 27 % investiert. Eingeschaltet legt er freies USDC über einer **Reserve** (60 USDC, mindestens 30 % des Kapitals – genug für einen Crash-Kauf ohne Rücknahme) in Binance Simple Earn Flexible an (3–9 % im Jahr, schwankend) und holt es vor einem Kauf zurück. Er führt ein eigenes Hauptbuch: Nur was **er** anlegt, zählt zu seinem Kapital; dein eigenes Earn-Guthaben bleibt unberührt. Eine Rücknahme, die noch unterwegs ist, zählt bis zu 6 Stunden weiter zum Kapital (keine Auszahlung); danach gilt, was Binance zeigt. Dauert sie länger als 20 Sekunden, kauft er mit der Reserve. Ausschalten holt sein Guthaben von selbst zurück. Risiken: verzögerte Rücknahme bei extremer Marktlage, Gegenpartei Binance. |
 | Einzahlungen | automatisch | werden erkannt, sofort ins Kapital gerechnet (Positionsgröße, Notstopp-Höchststand) und ab der nächsten Prüfung gehandelt; sie zählen nie als Gewinn |
 | Sperre nach Notstop | 24 h je Coin (Crash-Kauf) | ein Coin, der wie LUNA auf null fällt, wird nicht immer wieder nachgekauft |
 | Crash-Käufe gleichzeitig | höchstens 3 | im marktweiten Crash (März 2020) nie mehr als 60 % des Kapitals im Fall |
 | Tageslimit | aus | würde genau die Crash-Käufe blockieren; einschaltbar mit `DAILY_LOSS_LIMIT_PCT` |
 | Doppelte Orders | ausgeschlossen | jede Order hat eine eigene Nummer; nach Netzfehler oder Absturz wird bei Binance nachgesehen, bevor neu gehandelt wird |
-| Ein-/Auszahlungen | erkannt | zählen weder als Gewinn noch als Verlust und lösen keinen Notstopp aus |
-| Fremde Bestände | unangetastet | der Bot verkauft nur, was er selbst gekauft hat |
+| Ein-/Auszahlungen | erkannt | zählen weder als Gewinn noch als Verlust. Der Höchststand ändert sich bei jeder Ein- und Auszahlung im selben Verhältnis wie das Kapital – der Rückgang in Prozent bleibt gleich: Eine Auszahlung löst nie den Notstopp aus, und Hin und Her schwächt ihn nie ab. Auch USDC, das du selbst für einen Coin-Kauf ausgibst, ist für den Bot eine Auszahlung. |
+| Fremde Bestände | unangetastet | der Bot verkauft nur Coins, die er selbst gekauft hat. Aber: Jedes USDC im Spot-Konto zählt als sein Kapital, und BNB wird für Gebühren verbraucht. |
 | Ausführungswächter | jeder Kauf | misst, ob der Bot so günstig kauft wie die Simulation (Kaufkurs gegen den Signal-Schluss). Kauft er im Crash über 10 Käufe deutlich schlechter, wird **nur der Crash-Kauf** ausgesetzt – sein Vorteil wäre dann aufgezehrt. Weiter mit `/weiter`. |
 | Vorwärtstest | nach jedem Verkauf | vergleicht die letzten 30 Trades je Regel mit dem Rückblick und meldet, wenn es schlechter läuft als in 95 % aller vergangenen Phasen (nur Meldung) |
 | Schlüssel-Prüfung | täglich (Echtgeld) | warnt, wenn der API-Schlüssel auszahlen darf oder nicht mehr handeln darf |

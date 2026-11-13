@@ -412,12 +412,13 @@ class Broker:
                                                             "sapi_post_simple_earn_flexible_subscribe",
                                                             "sapi_post_simple_earn_flexible_redeem"))
 
-    def earn_position(self) -> EarnPosition:
-        """Angelegtes Guthaben in Simple Earn Flexible (Quote-Währung). Fehler -> ExchangeProblem."""
+    def earn_position(self, retries: int = 1) -> EarnPosition:
+        """Angelegtes Guthaben in Simple Earn Flexible (Quote-Währung). Fehler -> ExchangeProblem. Standard: ein Versuch –
+        die Abfrage läuft jede Minute und darf den Bot nie aufhalten (nächste Minute ist der nächste Versuch)."""
         if not self.earn_available():
             return EarnPosition(0.0, None, "", 0.0)
         raw = self._call("Earn-Guthaben", self.client.sapi_get_simple_earn_flexible_position,
-                         {"asset": self.quote, "size": 100})
+                         {"asset": self.quote, "size": 100}, retries=retries)
         rows = raw.get("rows") if isinstance(raw, dict) else raw
         amount, product, apr, rewards = 0.0, "", None, 0.0
         for row in rows or []:
@@ -441,10 +442,12 @@ class Broker:
         raise ExchangeProblem(f"Kein Simple-Earn-Produkt für {self.quote} gefunden.")
 
     def earn_subscribe(self, product_id: str, amount: float) -> bool:
-        """Guthaben anlegen. Rückgabe: angenommen? Kein Netz-Wiederholen (eine Anlage darf nie doppelt laufen)."""
+        """Guthaben anlegen. Rückgabe: angenommen? Kein Netz-Wiederholen (eine Anlage darf nie doppelt laufen).
+        autoSubscribe=false: Binance soll NICHT von sich aus freies Spot-Guthaben anlegen (Standard wäre an) – sonst
+        verschwindet die Reserve für Käufe, und das Hauptbuch des Bots stimmt nicht mehr."""
         try:
             result = self.client.sapi_post_simple_earn_flexible_subscribe(
-                {"productId": product_id, "amount": f"{amount:.8f}".rstrip("0").rstrip(".")})
+                {"productId": product_id, "amount": f"{amount:.8f}".rstrip("0").rstrip("."), "autoSubscribe": False})
         except ccxt.AuthenticationError as exc:
             raise AuthProblem(f"Earn anlegen: {exc}") from exc
         except Exception as exc:
@@ -515,6 +518,7 @@ class SimulatedExchange:
         self.earn_redeem_delay: int = 0          # so viele fetch_balance-Aufrufe nach einer Rücknahme bleibt das Geld weg
         self.earn_reject_redeem = False          # Rücknahme ablehnen (Binance: Rücknahmelimit erreicht)
         self._earn_pending: list[tuple[str, float, int]] = []   # (Währung, Betrag, verbleibende Aufrufe)
+        self.last_subscribe: dict[str, Any] = {}                 # Parameter der letzten Anlage (für Tests)
         if wallet_path and wallet_path.exists():
             saved = json.loads(wallet_path.read_text(encoding="utf-8"))
             self.balances = {k: float(v) for k, v in saved.get("balances", {}).items()}
@@ -540,6 +544,7 @@ class SimulatedExchange:
         return {"rows": rows, "total": len(rows)}
 
     def sapi_post_simple_earn_flexible_subscribe(self, params: dict[str, Any]) -> dict[str, Any]:
+        self.last_subscribe = dict(params)
         asset = str(params["productId"])[:-3]
         amount = float(params["amount"])
         if self.balances.get(asset, 0.0) < amount - 1e-9:

@@ -70,7 +70,8 @@ class Settings:
     dip_max_slippage_pct: float = 0.35   # Crash-Kauf aussetzen, wenn Käufe so viel schlechter sind als simuliert (0 = aus)
     slippage_window: int = 10            # … gemessen über so viele Crash-Käufe
     earn_enabled: bool = False           # ungenutztes Guthaben in Binance Simple Earn Flexible verzinsen
-    earn_reserve: float = 60.0           # so viel Quote-Währung bleibt immer frei im Spot-Konto (für Crash-Käufe)
+    earn_reserve: float = 60.0           # so viel Quote-Währung bleibt immer frei im Spot-Konto (für Crash-Käufe) …
+    earn_reserve_pct: float = 30.0       # … mindestens aber so viel Prozent des Kapitals (ein Crash-Kauf ohne Rücknahme)
     earn_redeem_wait_s: float = 20.0     # so lange auf eine Rücknahme warten, bevor mit der Reserve gekauft wird
     halt_wait_hours: float = 24.0        # nach einem Notstopp erst nach so vielen Stunden wieder /weiter
 
@@ -166,6 +167,7 @@ def load_settings(env_path: Path | str = ".env", environ: dict[str, str] | None 
         slippage_window=int(_number(values, "SLIPPAGE_WINDOW", 10, 3, 50, errors)),
         earn_enabled=_flag(values, "EARN_ENABLED", False, errors),
         earn_reserve=_number(values, "EARN_RESERVE_USDC", 60.0, 10.0, 1_000_000.0, errors),
+        earn_reserve_pct=_number(values, "EARN_RESERVE_PCT", 30.0, 0.0, 90.0, errors),
         earn_redeem_wait_s=_number(values, "EARN_REDEEM_WAIT_S", 20.0, 0.0, 120.0, errors),
         halt_wait_hours=_number(values, "HALT_WAIT_HOURS", 24.0, 0.0, 168.0, errors),
     )
@@ -187,6 +189,6 @@ _KEYS = {
     "SELFTEST_TRADE", "SCAN_REPORTS", "REPORT_HOUR", "TIMEZONE", "PAPER_START_BALANCE", "DATA_DIR",
     "DIP_ENABLED", "DIP_COINS", "DIP_DROP_PCT", "DIP_POSITION_PCT", "DIP_MAX_POSITIONS", "DIP_STOP_PCT",
     "DIP_HOLD_HOURS", "DIP_COOLDOWN_HOURS", "EXCHANGE_STOP", "EXCHANGE_STOP_BUFFER_PCT", "EXCHANGE_STOP_GAP_PCT",
-    "DIP_MAX_SLIPPAGE_PCT", "SLIPPAGE_WINDOW", "EARN_ENABLED", "EARN_RESERVE_USDC", "EARN_REDEEM_WAIT_S",
-    "HALT_WAIT_HOURS",
+    "DIP_MAX_SLIPPAGE_PCT", "SLIPPAGE_WINDOW", "EARN_ENABLED", "EARN_RESERVE_USDC", "EARN_RESERVE_PCT",
+    "EARN_REDEEM_WAIT_S", "HALT_WAIT_HOURS",
 }

@@ -41,9 +41,15 @@ DEFAULTS: dict[str, Any] = {
     "slippage": {},             # Regel -> Kauf-Abweichung in % vom Signal-Schluss (die letzten 50; guards.py)
     "dip_suspended": "",        # Grund, warum der Crash-Kauf ausgesetzt ist (Ausführungswächter); leer = aktiv
     "forward_warned": {},       # Regel -> Vorwärtstest-Warnung schon gesendet
-    "earn": {"amount": 0.0, "product": "", "apr": None, "rewards": 0.0, "rewards_at_start": None, "last_action": ""},
-    "earn_rewards_seen": 0.0,   # Zinsen, die schon aus der Einzahlungserkennung herausgerechnet sind
+    # Simple Earn: "amount" ist das Hauptbuch des Bots (was ER angelegt hat, plus seine Zinsen) – nicht die ganze Position
+    # bei Binance (die kann eigenes Guthaben des Nutzers enthalten). "transit": Rücknahme (+) oder Anlage (−), die Binance
+    # angenommen hat, die das Spot-Konto aber noch nicht zeigt. "interest": dem Bot gutgeschriebene Zinsen seit Start.
+    "earn": {"amount": 0.0, "product": "", "apr": None, "position": None, "rewards_seen": None, "interest": 0.0,
+             "transit": None, "short_since": None, "last_action": ""},
+    "earn_rewards_seen": 0.0,   # (bis v3; nicht mehr benutzt)
     "halted_at": None,          # Zeit (ms) des letzten Notstopps (Wartezeit vor /weiter)
+    "dd_limit_pct": None,       # Notstopp-Grenze beim letzten Start (erkennt eine gesenkte Grenze)
+    "dd_limit_carry": None,     # alte, höhere Grenze, die gilt, bis der Rückgang unter die neue fällt
     "month": None,              # Monat des letzten Monatsberichts ("2026-11")
     "month_start": None,        # Kapital, Einzahlungen, Gebühren, Zinsen zu Monatsbeginn (für den Monatsbericht)
     "decisions": [],            # die letzten Entscheidungen (für /warum): {"at", "text"}

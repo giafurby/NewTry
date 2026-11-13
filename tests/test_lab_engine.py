@@ -78,6 +78,37 @@ def test_joint_depot_without_crash_signals_equals_single_strategy():
     np.testing.assert_allclose(a, b)
 
 
+def test_leverage_one_equals_the_joint_depot():
+    rng = np.random.default_rng(5)
+    n, k = 600, 3
+    C = 100 * np.exp(np.cumsum(rng.normal(0, 0.012, (n, k)), axis=0))
+    O = np.vstack([C[:1], C[:-1]])
+    H, L = np.maximum(O, C) * 1.003, np.minimum(O, C) * 0.997
+    sigA, sigB = rng.random((n, k)) < 0.02, rng.random((n, k)) < 0.01
+    args = (O, H, L, C, O, sigA, np.full((n, k), 0.03), np.full((n, k), 0.08), 30, 0.01, 0.33, 3, 0.02,
+            sigB, 0.15, 16, 0.2, 3, 96, 0.002, 0, n)
+    a, ta = engine.sim_joint(*args)
+    b, liqs, interest = engine.sim_joint_lev(*args, 1.0, 0.0001, 1.1, 0.01)
+    assert len(ta) > 10 and liqs == 0 and interest == 0.0     # ohne Kredit keine Zinsen und keine Liquidation
+    np.testing.assert_allclose(a, b)
+
+
+def test_margin_liquidation_comes_before_the_stop():
+    n, k = 40, 1
+    O, H, L, C = flat(n, k)
+    L[20, 0] = 54.0                                         # Tief über dem Stop (50), aber unter der Liquidationsschwelle
+    sigA = np.zeros((n, k), bool)
+    sigA[10, 0] = True
+    eq, liqs, _ = engine.sim_joint_lev(O, H, L, C, O, sigA, np.full((n, k), 0.5), np.full((n, k), 10.0), 30, 1.0, 5.0,
+                                       3, 0.0, np.zeros((n, k), bool), 0.15, 16, 0.2, 3, 96, 0.0, 0, n,
+                                       5.0, 0.0, 1.1, 0.01)
+    # Kauf für 2,0 (Risiko 100 % / Stop 50 %), davon 1,0 geliehen. Beim Tief 54: Vermögen 1,08 ≤ 1,1 × Schulden 1,0
+    assert liqs == 1
+    assert eq[19] == pytest.approx(1.0)
+    assert eq[20] == pytest.approx(-1.0 + 0.02 * 54.0 * 0.99)   # zum Tief verkauft, 1 % Liquidationsgebühr
+    assert eq[-1] == pytest.approx(eq[20])
+
+
 def test_position_is_extended_while_entry_signal_persists():
     O, H, L, C = flat()
     sig = np.zeros((40, 1), bool)

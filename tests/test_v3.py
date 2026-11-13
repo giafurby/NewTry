@@ -39,9 +39,10 @@ def test_earn_is_off_by_default_and_in_paper_mode(tmp_path):
     bot, telegram, clock = started(tmp_path, exchange)
     refresh_minute(bot, clock)
     assert not exchange.earn
-    bot, telegram, clock = earn_started(tmp_path / "p", market(signals=()), mode="paper")
+    paper = market(signals=())
+    bot, telegram, clock = earn_started(tmp_path / "p", paper, mode="paper")
     refresh_minute(bot, clock)
-    assert not exchange.earn
+    assert not paper.earn                                                     # die Börse des Papier-Bots prüfen
 
 
 def test_interest_is_shown_and_not_counted_as_deposit(tmp_path):
